@@ -1,0 +1,370 @@
+@import 'tailwindcss';
+
+/* ---------------------------------------------------------------------------
+ * Semantic design tokens — light + dark driven by CSS variables.
+ * Components only ever reference semantic names (surface/border/ink/…).
+ * ------------------------------------------------------------------------- */
+
+:root {
+  --surface-0: #f6f7f9;
+  --surface-1: #ffffff;
+  --surface-2: #eef0f3;
+  --surface-3: #e4e7ec;
+  --border: #e2e4e9;
+  --border-strong: #cdd1d9;
+  --ink: #191b1f;
+  --ink-muted: #565b64;
+  --ink-faint: #9096a0;
+  --accent: #5457d6;
+  --accent-hover: #4649c0;
+  --accent-soft: rgba(84, 87, 214, 0.09);
+  --accent-ink: #ffffff;
+  --pending: #a16207;
+  --pending-bg: rgba(217, 119, 6, 0.12);
+  --ok: #15803d;
+  --ok-bg: rgba(22, 163, 74, 0.11);
+  --danger: #dc2626;
+  --danger-hover: #b91c1c;
+  --danger-bg: rgba(220, 38, 38, 0.09);
+  --add-fg: #116932;
+  --add-bg: rgba(34, 197, 94, 0.13);
+  --del-fg: #b91c1c;
+  --del-bg: rgba(239, 68, 68, 0.11);
+  --quote-bg: #f1f2f6;
+  --comment-tint: rgba(84, 87, 214, 0.055);
+  --shadow-card: 0 1px 2px rgba(16, 18, 24, 0.05), 0 4px 14px rgba(16, 18, 24, 0.06);
+  --shadow-pop: 0 8px 30px rgba(16, 18, 24, 0.14), 0 2px 8px rgba(16, 18, 24, 0.08);
+}
+
+.dark {
+  --surface-0: #0c0d10;
+  --surface-1: #14161a;
+  --surface-2: #1b1e24;
+  --surface-3: #23262d;
+  --border: #26292f;
+  --border-strong: #363a42;
+  --ink: #e8eaee;
+  --ink-muted: #a2a8b3;
+  --ink-faint: #666c77;
+  --accent: #8b8df2;
+  --accent-hover: #a3a4f6;
+  --accent-soft: rgba(139, 141, 242, 0.13);
+  --accent-ink: #101118;
+  --pending: #fbbf24;
+  --pending-bg: rgba(251, 191, 36, 0.12);
+  --ok: #4ade80;
+  --ok-bg: rgba(74, 222, 128, 0.11);
+  --danger: #f87171;
+  --danger-hover: #fca5a5;
+  --danger-bg: rgba(248, 113, 113, 0.12);
+  --add-fg: #6ee7a0;
+  --add-bg: rgba(52, 211, 153, 0.12);
+  --del-fg: #fda4af;
+  --del-bg: rgba(251, 113, 133, 0.12);
+  --quote-bg: #1b1e24;
+  --comment-tint: rgba(139, 141, 242, 0.07);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 14px rgba(0, 0, 0, 0.35);
+  --shadow-pop: 0 10px 34px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+@theme inline {
+  --color-surface-0: var(--surface-0);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-faint: var(--ink-faint);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-ink: var(--accent-ink);
+  --color-pending: var(--pending);
+  --color-pending-bg: var(--pending-bg);
+  --color-ok: var(--ok);
+  --color-ok-bg: var(--ok-bg);
+  --color-danger: var(--danger);
+  --color-danger-hover: var(--danger-hover);
+  --color-danger-bg: var(--danger-bg);
+  --color-add-fg: var(--add-fg);
+  --color-add-bg: var(--add-bg);
+  --color-del-fg: var(--del-fg);
+  --color-del-bg: var(--del-bg);
+  --color-quote-bg: var(--quote-bg);
+
+  --font-ui: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+  --font-serif: Charter, 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
+
+  --shadow-card: var(--shadow-card);
+  --shadow-pop: var(--shadow-pop);
+
+  --animate-fade-in: fade-in 0.16s ease-out;
+  --animate-rise: rise 0.22s cubic-bezier(0.21, 1.02, 0.73, 1);
+  --animate-pop: pop 0.14s ease-out;
+
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(10px) scale(0.985); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @keyframes pop {
+    from { opacity: 0; transform: scale(0.96); }
+    to { opacity: 1; transform: scale(1); }
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Base
+ * ------------------------------------------------------------------------- */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-ui);
+  background: var(--surface-0);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--ink-faint);
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------------------------------------------------------------------------
+ * Rendered markdown (the reading surface)
+ * ------------------------------------------------------------------------- */
+
+.md-block {
+  /* reset inside blocks so wrapper styles don't leak */
+}
+
+.preview-body {
+  font-size: 15.5px;
+  line-height: 1.75;
+  color: var(--ink);
+}
+
+.preview-body .md-block > *:first-child {
+  margin-top: 0;
+}
+.preview-body .md-block > *:last-child {
+  margin-bottom: 0;
+}
+
+.preview-body h1,
+.preview-body h2,
+.preview-body h3,
+.preview-body h4,
+.preview-body h5,
+.preview-body h6 {
+  font-family: var(--font-serif);
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  margin: 1.6em 0 0.6em;
+  line-height: 1.25;
+}
+.preview-body h1 {
+  font-size: 2em;
+  margin-top: 0.4em;
+  padding-bottom: 0.35em;
+  border-bottom: 1px solid var(--border);
+}
+.preview-body h2 {
+  font-size: 1.5em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--border);
+}
+.preview-body h3 {
+  font-size: 1.22em;
+}
+.preview-body h4 {
+  font-size: 1.05em;
+}
+
+.preview-body p,
+.preview-body ul,
+.preview-body ol,
+.preview-body blockquote,
+.preview-body pre,
+.preview-body table {
+  margin: 0.85em 0;
+}
+
+.preview-body ul {
+  list-style: disc;
+  padding-left: 1.5em;
+}
+.preview-body ol {
+  list-style: decimal;
+  padding-left: 1.5em;
+}
+.preview-body li + li {
+  margin-top: 0.3em;
+}
+.preview-body li > ul,
+.preview-body li > ol {
+  margin: 0.3em 0;
+}
+
+.preview-body a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  text-underline-offset: 3px;
+}
+.preview-body a:hover {
+  text-decoration-color: var(--accent);
+}
+
+.preview-body strong {
+  font-weight: 650;
+}
+
+.preview-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 2em 0;
+}
+
+.preview-body blockquote {
+  border-left: 3px solid var(--border-strong);
+  padding: 0.15em 0 0.15em 1em;
+  color: var(--ink-muted);
+}
+
+.preview-body code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.12em 0.35em;
+}
+
+.preview-body pre {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.9em 1.1em;
+  overflow-x: auto;
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+.preview-body pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+.preview-body table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+.preview-body th,
+.preview-body td {
+  border: 1px solid var(--border);
+  padding: 0.45em 0.8em;
+  text-align: left;
+}
+.preview-body th {
+  background: var(--surface-2);
+  font-weight: 600;
+}
+
+.preview-body img {
+  max-width: 100%;
+  border-radius: 8px;
+}
+
+/* Comment-covered block flagging */
+.md-commented {
+  position: relative;
+  background: var(--comment-tint);
+  box-shadow: inset 2px 0 0 var(--accent);
+  border-radius: 4px;
+  transition: background 0.15s ease;
+}
+.md-commented:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+/* Brief flash when jumping to an anchored block */
+.md-flash {
+  animation: md-flash 1.2s ease-out;
+}
+@keyframes md-flash {
+  0% {
+    background: var(--accent-soft);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Diff
+ * ------------------------------------------------------------------------- */
+
+.diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.diff-table td {
+  padding: 0 8px;
+  vertical-align: top;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diff-ln {
+  user-select: none;
+  text-align: right;
+  min-width: 3.2em;
+  color: var(--ink-faint);
+  background: var(--surface-2);
+  border-right: 1px solid var(--border);
+  padding-right: 6px !important;
+}
+.diff-add {
+  background: var(--add-bg);
+}
+.diff-del {
+  background: var(--del-bg);
+}
+.diff-add .diff-sign { color: var(--add-fg); }
+.diff-del .diff-sign { color: var(--del-fg); }
