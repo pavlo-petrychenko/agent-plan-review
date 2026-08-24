@@ -58,7 +58,7 @@ Add to `~/.claude/settings.json`:
 | --- | --- |
 | `hook-exit-plan-mode` | Blocks while you review. Approve → emits `allow` with echoed `updatedInput` (suppresses Claude Code's native confirmation) plus approve-notes as guidance. Request changes → emits `deny` carrying every comment compiled per document with line references and quotes. Validation failures deny with actionable issue lists. Hard timeout (`AGENT_PLAN_REVIEW_TIMEOUT`, default 1800 s) fails open to the native prompt. Every failure path fails open. |
 | `enter-plan-mode` | Injects multi-document format guidance as context only; consent to enter plan mode is untouched. |
-| `stop-gate` | If a turn would end while an MCP/API-origin review in this cwd is still pending (<5 h), blocks once telling the agent to call `plan_review_check`. Never double-blocks; fails open. |
+| `stop-gate` | If a turn would end while an MCP/API-origin review in this cwd is still pending (<5 h), reminds the agent AT MOST ONCE per review to make a single long `plan_review_check` call. Stands down entirely while a live plan-review-wake heartbeat exists. Never double-blocks; fails open. |
 
 ## Integration — pi & other MCP clients
 
@@ -70,11 +70,15 @@ Add to `~/.claude/settings.json`:
      "mcpServers": {
        "agent-plan-review": {
          "command": "node",
-         "args": ["/absolute/path/to/agent-plan-review/bin/agent-plan-review.js", "mcp"]
+         "args": ["/absolute/path/to/agent-plan-review/bin/agent-plan-review.js", "mcp"],
+         "requestTimeoutMs": 180000000
        }
      }
    }
    ```
+
+   `requestTimeoutMs` must cover one full long-poll (default ceiling 172800 s = 48 h + margin);
+   without it, clients fall back to shorter SDK defaults and kill the single-call strategy.
 
 2. Install the global skill so every session knows the workflow:
 
@@ -87,10 +91,25 @@ Add to `~/.claude/settings.json`:
    - **`plan_review_submit`** `{ cwd, markdown | plan | docs[] }` → validates and records
      through the same store, opens the browser, returns `{ reviewId, reviewUrl,
      projectKey, version }`.
-   - **`plan_review_check`** `{ reviewId?, wait_seconds? }` → long-polls (0–120 s,
-     recommended 20); returns `pending` / `approved (+notes)` / `rejected (+reason)`
-     with loop-oriented guidance. Feedback text tells the agent to re-submit via
-     `plan_review_submit`.
+   - **`plan_review_check`** `{ reviewId?, wait_seconds? }` → TRUE LONG-POLL: returns the
+     moment the decision lands or `wait_seconds` elapses (ceiling `AGENT_PLAN_REVIEW_MAX_WAIT`,
+     default 172800 s = 48 h). Returns `pending` / `approved (+notes)` / `rejected (+reason)`.
+     The intended strategy is ONE long call per review — never a short-poll loop. Emits
+     periodic progress notifications so silent calls survive client idle-timeouts.
+     Clients that auto-background long calls (Claude Code after ~2 min) deliver the result
+     on their own; the steering text tells agents not to re-call or re-submit then.
+
+4. Optional zero-poll wake for pi sessions:
+
+   ```bash
+   agent-plan-review install-pi-extension   # → ~/.pi/agent/extensions/plan-review-wake.ts
+   ```
+
+   The extension watches `~/.agent-plan-review/reviews/*.json`; when a review from this
+   cwd resolves it injects the decision into the idle session and triggers a turn — so
+   the agent can end its turn right after submitting. It also writes a heartbeat to
+   `~/.agent-plan-review/wake-active.json`, which makes the Claude Code stop-gate stand
+   down (no waker ⇒ the gate still reminds once per review).
 
 The server starts itself on first use (`EADDRINUSE` from a second instance exits 0
 quietly). Rejection reasons compiled for MCP/API reviews instruct re-submission via

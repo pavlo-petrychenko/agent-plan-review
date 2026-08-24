@@ -29,6 +29,22 @@ export function reviewTimeoutSeconds(): number {
   return Number.parseInt(raw ?? '', 10) || 1800;
 }
 
+/**
+ * Upper bound (seconds) for plan_review_check long-polls. One long call is the
+ * intended wait strategy — agents should request the full ceiling and let the
+ * long-poll return early the moment the human decides.
+ */
+export function maxCheckWaitSeconds(): number {
+  const raw = process.env.AGENT_PLAN_REVIEW_MAX_WAIT?.trim() || process.env.PLAN_REVIEW_MAX_WAIT?.trim();
+  return Number.parseInt(raw ?? '', 10) || 172800;
+}
+
+/** Interval (ms) between keepalive progress notifications during a check poll. */
+export function checkProgressIntervalMs(): number {
+  const raw = process.env.AGENT_PLAN_REVIEW_PROGRESS_MS?.trim();
+  return Math.max(Number.parseInt(raw ?? '', 10) || 20000, 250);
+}
+
 export function serverJsonPath(cfg: ServerConfig): string {
   return path.join(cfg.home, 'server.json');
 }
