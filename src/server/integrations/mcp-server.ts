@@ -4,11 +4,13 @@
  * Newline-delimited JSON-RPC over stdin/stdout, hand-rolled to keep the
  * dependency footprint at zero. Submit validates and records through the
  * SAME store path as the hook, returns the review coordinates and opens the
- * browser. Check LONG-POLLS (wait_seconds, default 0, cap 120) and returns
- * loop-oriented guidance.
+ * browser. Check TRUE LONG-POLLS (returns the moment the decision lands;
+ * wait_seconds is only a ceiling) and emits periodic progress notifications
+ * so long calls survive client idle-timeouts. Loop-oriented guidance steers
+ * agents toward ONE long call instead of a polling loop.
  */
 
-import { APP_NAME, APP_VERSION, loadConfig } from '../config.js';
+import { APP_NAME, APP_VERSION, checkProgressIntervalMs, loadConfig, maxCheckWaitSeconds } from '../config.js';
 import { PlanReviewStore } from '../store/store.js';
 import { PlanValidationError } from '../util/errors.js';
 import { compileIssues } from '../../shared/compile.js';
@@ -58,13 +60,16 @@ const TOOLS = [
   {
     name: 'plan_review_check',
     description:
-      'Wait for the human decision on a submitted plan. Long-polls up to wait_seconds (default 0, max 120; recommended 20). ' +
-      'Returns status pending/approved/rejected with notes or compiled feedback. Keep calling until resolved.',
+      'Wait for the human decision on a submitted plan. TRUE LONG-POLL: returns the moment the ' +
+      'decision lands or wait_seconds elapses, whichever is first — so ONE long call beats a loop ' +
+      'of short calls (recommended: wait_seconds=3600). If your harness moves the call to the ' +
+      'background (Claude Code auto-backgrounds after ~2 min): do NOT call again and do NOT ' +
+      're-submit; the result arrives automatically when the human decides.',
     inputSchema: {
       type: 'object',
       properties: {
         reviewId: { type: 'string', description: 'Review id from plan_review_submit. Omit to use the newest pending review in cwd.' },
-        wait_seconds: { type: 'number', description: 'Seconds to long-poll (0-120, recommended 20).' },
+        wait_seconds: { type: 'number', description: 'Max seconds to long-poll (default 0; ceiling AGENT_PLAN_REVIEW_MAX_WAIT, default 3600).' },
       },
     },
   },
@@ -98,7 +103,7 @@ export async function runMcpServer(): Promise<void> {
       const name = String(msg.params?.name ?? '');
       const args = (msg.params?.arguments ?? {}) as Record<string, unknown>;
       try {
-        return await callTool(store, name, args);
+        return await callTool(store, name, args, msg.params?._meta as Record<string, unknown> | undefined);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return toolError(message);
@@ -142,9 +147,9 @@ export async function runMcpServer(): Promise<void> {
     if (closed) process.exit(0);
   }, 1000).unref();
 
-  async function callTool(store: PlanReviewStore, name: string, args: Record<string, unknown>): Promise<unknown> {
+  async function callTool(store: PlanReviewStore, name: string, args: Record<string, unknown>, meta?: Record<string, unknown>): Promise<unknown> {
     if (name === 'plan_review_submit') return submit(store, args);
-    if (name === 'plan_review_check') return check(store, args);
+    if (name === 'plan_review_check') return check(store, args, meta);
     return toolError(`Unknown tool: ${name}`);
   }
 
@@ -191,7 +196,10 @@ export async function runMcpServer(): Promise<void> {
           null,
           2,
         ) +
-          '\n\nPlan submitted for human review. Call plan_review_check with wait_seconds=20 and keep polling until the status is approved or rejected.',
+          '\n\nPlan submitted for human review. Wait for the decision with ONE long call:\n' +
+          'plan_review_check { "reviewId": "<id>", "wait_seconds": 3600 }. It is a true long-poll — it returns the moment the human decides, so one call is enough.\n' +
+          '- If your harness moves that call to the background (e.g. Claude Code after ~2 min), do NOT re-call and do NOT re-submit; you will be woken with the result.\n' +
+          '- Never loop short waits; never re-submit while a review is pending.',
       );
     } catch (err) {
       if (err instanceof PlanValidationError) {
@@ -201,22 +209,43 @@ export async function runMcpServer(): Promise<void> {
     }
   }
 
-  async function check(store: PlanReviewStore, args: Record<string, unknown>) {
-    const wait = Math.min(Math.max(Number(args.wait_seconds ?? 0) || 0, 0), 120);
+  async function check(store: PlanReviewStore, args: Record<string, unknown>, meta?: Record<string, unknown>) {
+    const wait = Math.min(Math.max(Number(args.wait_seconds ?? 0) || 0, 0), maxCheckWaitSeconds());
     let review = await resolveReview(store, args);
     if (!review) {
       return toolText(JSON.stringify({ status: 'not_found' }) + '\n\nNo matching review found. Re-submit with plan_review_submit.');
     }
 
-    const deadline = Date.now() + wait * 1000;
+    // Periodic progress notifications keep client idle-timeouts from reaping a
+    // silent stdio connection mid-poll (Claude Code ~30 min watchdog, pi adapter
+    // 10 min idle disconnect). Echo the client's token when it sent one;
+    // otherwise synthesize one — unmatched tokens are dropped by clients.
+    const token = (meta?.progressToken as string | number | undefined) ?? 'plan-review-keepalive';
+    const intervalMs = checkProgressIntervalMs();
+    const started = Date.now();
+    const deadline = started + wait * 1000;
+    let lastProgress = 0;
     while (review.status === 'pending' && Date.now() < deadline) {
       await sleep(300);
       review = (await store.getReview(review.id)) ?? review;
+      const now = Date.now();
+      if (now - lastProgress >= intervalMs && review.status === 'pending') {
+        lastProgress = now;
+        write({
+          jsonrpc: '2.0',
+          method: 'notifications/progress',
+          params: {
+            progressToken: token,
+            progress: Math.round((now - started) / 1000),
+            message: `plan_review_check still waiting for the human decision (${Math.round((now - started) / 1000)}s elapsed)`,
+          },
+        });
+      }
     }
 
     if (review.status === 'pending') {
       return toolText(
-        `${JSON.stringify({ status: 'pending', reviewId: review.id })}\n\nStill pending — do not end your turn. Call plan_review_check again (wait_seconds=20).`,
+        `${JSON.stringify({ status: 'pending', reviewId: review.id })}\n\nStill pending after ${wait}s. Call plan_review_check ONCE more with wait_seconds=3600 — never short-poll in a loop. Do not re-submit the plan.`,
       );
     }
     if (review.status === 'approved') {

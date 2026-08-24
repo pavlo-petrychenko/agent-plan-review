@@ -1,11 +1,18 @@
 ---
 name: agent-plan-review
-description: Submit implementation plans to the human for review in a browser UI and wait for their approve/request-changes decision. Use whenever you have a plan ready before starting a substantial implementation task — plan mode, feature work, refactors, migrations. Works in pi via MCP tools and in Claude Code via ExitPlanMode hooks.
+description: Submit implementation plans to the human for review in a browser UI and wait for their approve/request-changes decision. Use whenever you have a plan ready before starting a substantial implementation task — plan mode, feature work, refactors, migrations. Works in Claude Code via ExitPlanMode hooks (preferred) and everywhere via MCP tools.
 ---
 
 # Plan Review
 
 Give the human a real review surface for your plans instead of a terminal yes/no.
+
+## Choose your integration
+
+- **Claude Code**: PREFER plan mode. Presenting the plan via ExitPlanMode blocks
+  until decided — the hook does the waiting, zero polling, zero wasted turns.
+  Use the MCP flow below only outside plan mode or when no hooks are installed.
+- **pi & any other MCP client**: use the MCP flow below.
 
 ## When to use
 
@@ -20,18 +27,29 @@ Give the human a real review surface for your plans instead of a terminal yes/no
    `plan_review_submit` with `{ cwd: <absolute project path>, markdown: <plan> }`
    → returns `{ reviewId, reviewUrl, projectKey, version }` and opens the browser.
 
-2. **Poll** for the decision:
+2. **Wait with ONE long call** — never poll in a loop:
 
-   `plan_review_check` with `{ reviewId, wait_seconds: 20 }`.
+   `plan_review_check` with `{ reviewId, wait_seconds: 3600 }`.
 
-   - `status: "pending"` → call again. Keep polling; do NOT end your turn while a
-     review is pending.
+   - It is a TRUE LONG-POLL: it returns the moment the human decides, so one
+     long call is enough. A pending result after the full wait just means the
+     human needs more time: call ONCE more with the same arguments.
+   - **If your harness moves the call to the background** (Claude Code does this
+     after ~2 min): do NOT call again and do NOT re-submit. Keep working or end
+     your turn — the result arrives automatically as a notification that starts
+     a new turn.
+   - **If the plan-review-wake pi extension is installed**, you may instead end
+     your turn right after submitting: it watches the store and injects the
+     decision (it writes ~/.agent-plan-review/wake-active.json).
    - `status: "approved"` → proceed with implementation. If notes are returned,
      incorporate them as part of the work.
    - `status: "rejected"` → the result contains compiled feedback (per document,
      with line references and quotes). Address EVERY comment, then re-submit the
      revised plan with `plan_review_submit`. It becomes the next version and the
      human can diff the two.
+
+NEVER short-poll (short waits in a loop) and NEVER re-submit while a review is
+pending — both waste tokens for zero information.
 
 ## Multi-document plans
 
@@ -61,10 +79,15 @@ Invalid plans are rejected with an issue list — fix every issue and re-submit.
 
 If hooks are installed (`hook-exit-plan-mode`), presenting a plan via ExitPlanMode is
 all you need: the tool blocks while the human reviews and returns allow/deny with the
-decision. Call `agent-plan-review install-skill` to make this skill available anyway.
+decision. Outside plan mode, use the MCP flow above — a long `plan_review_check`
+call auto-backgrounds after ~2 min and delivers the result later by itself.
 
 ## Setup
 
 - Server starts automatically on first submit (`http://localhost:4620`).
+- MCP registration with a request timeout that covers one long call:
+  `"agent-plan-review": { "command": "<path-to>/bin/agent-plan-review.js", "args": ["mcp"], "requestTimeoutMs": 3900000 }`
+- Optional pi wake extension: `agent-plan-review install-pi-extension`.
 - Env: `AGENT_PLAN_REVIEW_HOME` (default `~/.agent-plan-review`),
-  `AGENT_PLAN_REVIEW_PORT`, `AGENT_PLAN_REVIEW_TIMEOUT`.
+  `AGENT_PLAN_REVIEW_PORT`, `AGENT_PLAN_REVIEW_TIMEOUT`,
+  `AGENT_PLAN_REVIEW_MAX_WAIT` (check ceiling, default 3600 s).
