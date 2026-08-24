@@ -204,7 +204,7 @@ test('submit steering text prescribes ONE long call and forbids resubmit-while-p
     const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'apr-proj-'));
     const text = await driver.callTool('plan_review_submit', { cwd: projectDir, markdown: '# P\n\nx' });
     assert.match(text, /ONE long call/);
-    assert.match(text, /wait_seconds.*3600/);
+    assert.match(text, /wait_seconds.*172800/);
     assert.match(text, /do NOT re-call and do NOT re-submit/);
 
     const checkDesc = await driver.request('tools/list', {});
@@ -212,7 +212,7 @@ test('submit steering text prescribes ONE long call and forbids resubmit-while-p
     const check = tools.find((tool) => tool.name === 'plan_review_check');
     assert.ok(check);
     assert.match(check.description, /TRUE LONG-POLL/);
-    assert.match(check.description, /recommended: wait_seconds=3600/);
+    assert.match(check.description, /recommended: wait_seconds.*172800/);
     assert.doesNotMatch(check.description, /Keep calling/);
   } finally {
     driver.close();

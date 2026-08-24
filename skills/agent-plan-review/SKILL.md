@@ -29,7 +29,7 @@ Give the human a real review surface for your plans instead of a terminal yes/no
 
 2. **Wait with ONE long call** — never poll in a loop:
 
-   `plan_review_check` with `{ reviewId, wait_seconds: 3600 }`.
+   `plan_review_check` with `{ reviewId, wait_seconds: 172800 }`.
 
    - It is a TRUE LONG-POLL: it returns the moment the human decides, so one
      long call is enough. A pending result after the full wait just means the
@@ -86,8 +86,8 @@ call auto-backgrounds after ~2 min and delivers the result later by itself.
 
 - Server starts automatically on first submit (`http://localhost:4620`).
 - MCP registration with a request timeout that covers one long call:
-  `"agent-plan-review": { "command": "<path-to>/bin/agent-plan-review.js", "args": ["mcp"], "requestTimeoutMs": 3900000 }`
+  `"agent-plan-review": { "command": "<path-to>/bin/agent-plan-review.js", "args": ["mcp"], "requestTimeoutMs": 180000000 }`
 - Optional pi wake extension: `agent-plan-review install-pi-extension`.
 - Env: `AGENT_PLAN_REVIEW_HOME` (default `~/.agent-plan-review`),
   `AGENT_PLAN_REVIEW_PORT`, `AGENT_PLAN_REVIEW_TIMEOUT`,
-  `AGENT_PLAN_REVIEW_MAX_WAIT` (check ceiling, default 3600 s).
+  `AGENT_PLAN_REVIEW_MAX_WAIT` (check ceiling, default 172800 s = 48 h).

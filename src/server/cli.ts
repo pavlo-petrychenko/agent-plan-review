@@ -49,7 +49,7 @@ Integration — Claude Code (hooks, blocking):
 
 Integration — pi & any MCP client (tools, one-shot long-poll):
   .mcp.json / ~/.config/mcp/mcp.json → mcpServers:
-    "agent-plan-review": { "command": "${APP_NAME}", "args": ["mcp"], "requestTimeoutMs": 3900000 }
+    "agent-plan-review": { "command": "${APP_NAME}", "args": ["mcp"], "requestTimeoutMs": 180000000 }
   Agents submit with plan_review_submit, then make ONE long plan_review_check call
   (wait_seconds up to AGENT_PLAN_REVIEW_MAX_WAIT). Clients that auto-background long
   calls (Claude Code) deliver the result on their own.
@@ -58,7 +58,7 @@ Environment:
   AGENT_PLAN_REVIEW_HOME        Storage root (default ~/.agent-plan-review)
   AGENT_PLAN_REVIEW_PORT        Server port (default ${cfg.port})
   AGENT_PLAN_REVIEW_TIMEOUT     Hook blocking timeout in seconds (default 1800)
-  AGENT_PLAN_REVIEW_MAX_WAIT    plan_review_check ceiling in seconds (default 3600)
+  AGENT_PLAN_REVIEW_MAX_WAIT    plan_review_check ceiling in seconds (default 172800 = 48 h)
   AGENT_PLAN_REVIEW_PROGRESS_MS Keepalive progress interval during checks (default 20000)
   (legacy PLAN_REVIEW_* spellings are still honored)
 `;

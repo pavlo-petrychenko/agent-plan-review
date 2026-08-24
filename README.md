@@ -71,13 +71,13 @@ Add to `~/.claude/settings.json`:
        "agent-plan-review": {
          "command": "node",
          "args": ["/absolute/path/to/agent-plan-review/bin/agent-plan-review.js", "mcp"],
-         "requestTimeoutMs": 3900000
+         "requestTimeoutMs": 180000000
        }
      }
    }
    ```
 
-   `requestTimeoutMs` must cover one full long-poll (default ceiling 3600 s + margin);
+   `requestTimeoutMs` must cover one full long-poll (default ceiling 172800 s = 48 h + margin);
    without it, clients fall back to shorter SDK defaults and kill the single-call strategy.
 
 2. Install the global skill so every session knows the workflow:
@@ -93,7 +93,7 @@ Add to `~/.claude/settings.json`:
      projectKey, version }`.
    - **`plan_review_check`** `{ reviewId?, wait_seconds? }` → TRUE LONG-POLL: returns the
      moment the decision lands or `wait_seconds` elapses (ceiling `AGENT_PLAN_REVIEW_MAX_WAIT`,
-     default 3600 s). Returns `pending` / `approved (+notes)` / `rejected (+reason)`.
+     default 172800 s = 48 h). Returns `pending` / `approved (+notes)` / `rejected (+reason)`.
      The intended strategy is ONE long call per review — never a short-poll loop. Emits
      periodic progress notifications so silent calls survive client idle-timeouts.
      Clients that auto-background long calls (Claude Code after ~2 min) deliver the result

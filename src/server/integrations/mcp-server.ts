@@ -62,14 +62,14 @@ const TOOLS = [
     description:
       'Wait for the human decision on a submitted plan. TRUE LONG-POLL: returns the moment the ' +
       'decision lands or wait_seconds elapses, whichever is first — so ONE long call beats a loop ' +
-      'of short calls (recommended: wait_seconds=3600). If your harness moves the call to the ' +
+      'of short calls (recommended: wait_seconds=172800). If your harness moves the call to the ' +
       'background (Claude Code auto-backgrounds after ~2 min): do NOT call again and do NOT ' +
       're-submit; the result arrives automatically when the human decides.',
     inputSchema: {
       type: 'object',
       properties: {
         reviewId: { type: 'string', description: 'Review id from plan_review_submit. Omit to use the newest pending review in cwd.' },
-        wait_seconds: { type: 'number', description: 'Max seconds to long-poll (default 0; ceiling AGENT_PLAN_REVIEW_MAX_WAIT, default 3600).' },
+        wait_seconds: { type: 'number', description: 'Max seconds to long-poll (default 0; ceiling AGENT_PLAN_REVIEW_MAX_WAIT, default 172800 = 48 h).' },
       },
     },
   },
@@ -197,7 +197,7 @@ export async function runMcpServer(): Promise<void> {
           2,
         ) +
           '\n\nPlan submitted for human review. Wait for the decision with ONE long call:\n' +
-          'plan_review_check { "reviewId": "<id>", "wait_seconds": 3600 }. It is a true long-poll — it returns the moment the human decides, so one call is enough.\n' +
+          'plan_review_check { "reviewId": "<id>", "wait_seconds": 172800 }. It is a true long-poll — it returns the moment the human decides, so one call is enough.\n' +
           '- If your harness moves that call to the background (e.g. Claude Code after ~2 min), do NOT re-call and do NOT re-submit; you will be woken with the result.\n' +
           '- Never loop short waits; never re-submit while a review is pending.',
       );
@@ -245,7 +245,7 @@ export async function runMcpServer(): Promise<void> {
 
     if (review.status === 'pending') {
       return toolText(
-        `${JSON.stringify({ status: 'pending', reviewId: review.id })}\n\nStill pending after ${wait}s. Call plan_review_check ONCE more with wait_seconds=3600 — never short-poll in a loop. Do not re-submit the plan.`,
+        `${JSON.stringify({ status: 'pending', reviewId: review.id })}\n\nStill pending after ${wait}s. Call plan_review_check ONCE more with wait_seconds=172800 — never short-poll in a loop. Do not re-submit the plan.`,
       );
     }
     if (review.status === 'approved') {
