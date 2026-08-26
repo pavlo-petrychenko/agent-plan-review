@@ -5,6 +5,8 @@ import { CommentThread } from '../comments/CommentThread.js';
 import { CommentComposer, type ComposerState } from '../comments/CommentComposer.js';
 import { EmptyState, cx } from '../primitives.js';
 import { IconChat } from '../icons.js';
+import { useTheme } from '../../state/theme.js';
+import { renderMermaidBlocks } from './mermaid.js';
 
 export interface SectionFilter {
   start: number;
@@ -41,6 +43,7 @@ export function PreviewPane({
   onDeleteComment,
   onNavigateDoc,
 }: PreviewPaneProps) {
+  const { theme } = useTheme();
   const containerRef = useRef<HTMLDivElement>(null);
   const blockRefs = useRef(new Map<number, HTMLDivElement>());
   const [composer, setComposer] = useState<ComposerState | null>(null);
@@ -94,6 +97,16 @@ export function PreviewPane({
     setPendingSelection(null);
     setComposer(null);
   }, [html]);
+
+  // Render ```mermaid code blocks in-place (no-ops when none present).
+  // Depends on section/theme too: filtering remounts blocks, toggling the
+  // theme should re-theme diagrams. React wipes our DOM edits whenever block
+  // html changes, so stale renders can't accumulate.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    void renderMermaidBlocks(container, theme === 'dark').catch(() => {});
+  }, [blocks, section, theme]);
 
   // General-note requests open the composer centered, without a line anchor.
   useEffect(() => {

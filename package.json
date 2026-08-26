@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "A local review surface for AI coding-agent plans (Claude Code via hooks, pi via MCP): read rendered plans, annotate them, approve or request changes \u2014 decisions flow back to the agent.",
+  "description": "A local review surface for AI coding-agent plans (Claude Code via hooks, pi via MCP): read rendered plans, annotate them, approve or request changes — decisions flow back to the agent.",
   "license": "MIT",
   "bin": {
     "agent-plan-review": "bin/agent-plan-review.js"
@@ -26,6 +26,7 @@
   "dependencies": {
     "express": "^4.21.2",
     "hastscript": "^9.0.1",
+    "mermaid": "^11.17.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "rehype-stringify": "^10.0.1",

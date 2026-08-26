@@ -308,6 +308,23 @@ body {
   border-radius: 8px;
 }
 
+/* Rendered mermaid diagrams (see preview/mermaid.ts) */
+.preview-body .md-mermaid {
+  display: flex;
+  justify-content: center;
+  overflow-x: auto;
+  padding: 0.35rem 0;
+}
+.preview-body .md-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Unrenderable diagram — keep the source visible, flag it */
+.preview-body .md-mermaid-error {
+  border-color: var(--danger);
+}
+
 /* Comment-covered block flagging */
 .md-commented {
   position: relative;
