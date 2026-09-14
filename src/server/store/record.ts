@@ -5,6 +5,7 @@ import type { Manifest, ProjectMeta, PlanIssue, RecordPlanResult, ReviewOrigin }
 import { parsePlan, type ParsedDoc } from '../../shared/parser.js';
 import { validateDocs, type ValidatableDoc } from '../../shared/validate.js';
 import { sanitizeProjectKey } from '../../shared/keys.js';
+import { resolveProjectCwd } from '../util/project-cwd.js';
 import type { Layout } from './paths.js';
 import { ensureDir } from '../util/fs.js';
 import { PlanValidationError } from '../util/errors.js';
@@ -92,7 +93,14 @@ export async function recordPlan(
   if (issues.length > 0) throw new PlanValidationError(issues);
 
   // --- project ----------------------------------------------------------------
-  const cwd = input.cwd.trim();
+  const rawCwd = input.cwd.trim();
+  // Fold subdirectory submissions onto their repo/worktree root (or the nearest
+  // already-registered project) so one codebase stays one project. Worktrees
+  // stay separate: a worktree's own toplevel IS the worktree root.
+  const cwd = resolveProjectCwd(
+    rawCwd,
+    (await projects.list()).map((p) => p.cwd),
+  );
   const key = sanitizeProjectKey(cwd);
   const { meta } = await projects.getOrCreate(cwd, input.name);
 
@@ -165,6 +173,9 @@ export async function recordPlan(
     version,
     origin: input.origin,
     cwd,
+    // Keep the agent's raw path when it was folded, so gates and diagnostics
+    // can still match a session started inside a subdirectory.
+    agentCwd: rawCwd === cwd ? undefined : rawCwd,
     toolUseId: input.toolUseId,
   });
 

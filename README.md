@@ -147,14 +147,21 @@ Root content…
   byte-identical re-presentations (content-hash dedup).
 - **Deciding** — pending/approved/rejected surfaced at all times; buttons only enabled
   when viewing the exact version under review; ~2.5 s polling while pending.
-- **Comparing** — diff against any base version, split or unified, per-document scoping,
-  +/- stats, missing sides diff against empty content.
+- **Comparing** — GitHub-style all-pages diff against any base version: every page in
+  one scroll with per-page headers and +/- counts, hunks of ±3 context lines with
+  expandable unchanged runs, split or unified, and comments on either side of the diff
+  (removed-line anchors are compiled back to the agent as `[removed in vN, lines X-Y]`).
+  Missing sides diff against empty content.
 - **Exporting** — push the current version's markdown to a secret GitHub Gist through
   your installed `gh` CLI (no tokens stored). One destination per channel per project.
 - **Housekeeping** — manage modal listing all projects/versions; immediate deletes;
-  pending reviews protected behind explicit Force (“This plan was deleted in the review
-  UI…”); bulk delete is partial-success aware; deep links restore project/version/doc/
-  review.
+  move versions/projects into another project (renumbered in place, comments and
+  pending reviews travel); pending reviews protected behind explicit Force (“This plan
+  was deleted in the review UI…”); bulk delete is partial-success aware; deep links
+  restore project/version/doc/review.
+- **Project keying** — a project is keyed by its cwd, resolved to the git toplevel, so a
+  plan submitted from a subdirectory joins its repo/worktree project (worktrees stay
+  separate; outside a repo the nearest registered ancestor wins).
 
 ## Configuration
 

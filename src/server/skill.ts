@@ -39,8 +39,12 @@ Give the human a real review surface for your plans instead of a terminal yes/no
 
 1. **Submit** the plan:
 
-   \`plan_review_submit\` with \`{ cwd: <absolute project path>, markdown: <plan> }\`
+   \`plan_review_submit\` with \`{ cwd: <absolute repo/worktree root>, markdown: <plan> }\`
    → returns \`{ reviewId, reviewUrl, projectKey, version }\` and opens the browser.
+
+   Pass the ROOT of the repo or worktree the plan belongs to (its git toplevel).
+   Subdirectories are folded onto the containing project automatically, so a plan
+   submitted from a nested folder still lands as a new version of the same project.
 
 2. **Wait with ONE long call** — never poll in a loop:
 
@@ -61,7 +65,8 @@ Give the human a real review surface for your plans instead of a terminal yes/no
    - \`status: "rejected"\` → the result contains compiled feedback (per document,
      with line references and quotes). Address EVERY comment, then re-submit the
      revised plan with \`plan_review_submit\`. It becomes the next version and the
-     human can diff the two.
+     human can diff the two — the diff shows every page at once, and comments may
+     target removed lines too (they arrive as \`[removed in vN, lines X-Y]\`).
 
 NEVER short-poll (short waits in a loop) and NEVER re-submit while a review is
 pending — both waste tokens for zero information.

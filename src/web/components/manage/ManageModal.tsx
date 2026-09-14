@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { BulkDeleteResponse, ProjectDetail, ProjectSummary } from '../../../shared/types.js';
 import { invalidate, useApi } from '../../api/cache.js';
 import { endpoints, keys } from '../../api/endpoints.js';
-import { Button, EmptyState, ErrorNote, Modal, Pill, Spinner } from '../primitives.js';
+import { Button, EmptyState, ErrorNote, Modal, Pill, Select, Spinner } from '../primitives.js';
 import { IconAlert, IconFolder, IconTrash } from '../icons.js';
 import { useToast } from '../../state/toasts.js';
 
@@ -34,7 +34,7 @@ export function ManageModal({ open, onClose, onChanged }: ManageModalProps) {
   const [forceProjectKey, setForceProjectKey] = useState<string | null>(null);
 
   const refresh = (): void => {
-    invalidate('projects', 'project:', 'version:', 'doc:', 'comments:', 'storage:', 'review:');
+    invalidate('projects', 'project:', 'version:', 'doc:', 'comments:', 'storage:', 'review:', 'diff:');
     onChanged();
   };
 
@@ -74,6 +74,26 @@ export function ManageModal({ open, onClose, onChanged }: ManageModalProps) {
     if (del && blocked) toast(`Deleted ${del}. Blocked: ${blocked}. Force will auto-reject.`, 'info');
     else if (del) toast(`Deleted ${del}`, 'success');
     else if (blocked) toast(`Blocked: ${blocked}. Use Force to auto-reject and delete.`, 'error');
+  };
+
+  /** Move versions (or a whole project) into another project, renumbering in place. */
+  const moveVersions = async (fromKey: string, versions: number[] | undefined, to: string): Promise<void> => {
+    setBusy(true);
+    try {
+      const res = await endpoints.moveVersions(fromKey, to, versions);
+      const names = res.moved.map((m) => `v${m.from}→v${m.to}`).join(', ');
+      toast(`Moved ${names}${res.sourceRemoved ? ' — source project removed' : ''}`, 'success');
+      setTicked((prev) => {
+        const next = new Set(prev);
+        for (const id of [...next]) if (id.startsWith(`${fromKey}:`)) next.delete(id);
+        return next;
+      });
+      refresh();
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Move failed', 'error');
+    } finally {
+      setBusy(false);
+    }
   };
 
   const removeProject = async (summary: ProjectSummary, force: boolean): Promise<void> => {
@@ -123,10 +143,12 @@ export function ManageModal({ open, onClose, onChanged }: ManageModalProps) {
               <ProjectSection
                 key={p.key}
                 summary={p}
+                others={projects.data!.filter((o) => o.key !== p.key)}
                 isTicked={(n) => ticked.has(`${p.key}:${n}`)}
                 onTick={(n) => tick(p.key, n)}
                 busy={busy}
                 onBulkDelete={(versions, force) => void bulkDelete(p.key, versions, force)}
+                onMove={(versions, to) => void moveVersions(p.key, versions, to)}
                 onDeleteProject={() => void removeProject(p, false)}
                 forceArmed={forceProjectKey === p.key}
                 onForceProject={() => void removeProject(p, true)}
@@ -165,20 +187,24 @@ export function ManageModal({ open, onClose, onChanged }: ManageModalProps) {
 
 function ProjectSection({
   summary,
+  others,
   isTicked,
   onTick,
   busy,
   onBulkDelete,
+  onMove,
   onDeleteProject,
   forceArmed,
   onForceProject,
   onDisarmForce,
 }: {
   summary: ProjectSummary;
+  others: ProjectSummary[];
   isTicked: (n: number) => boolean;
   onTick: (n: number) => void;
   busy: boolean;
   onBulkDelete: (versions: number[], force: boolean) => void;
+  onMove: (versions: number[] | undefined, to: string) => void;
   onDeleteProject: () => void;
   forceArmed: boolean;
   onForceProject: () => void;
@@ -209,6 +235,7 @@ function ProjectSection({
         {selected.length > 0 ? (
           <div className="flex items-center gap-2">
             <span className="text-[12px] text-ink-muted">{selected.length} selected</span>
+            <MoveControl label={`Move ${selected.length}`} others={others} busy={busy} onMove={(to) => onMove(selected, to)} />
             <Button size="sm" variant="danger" disabled={busy} onClick={() => onBulkDelete(selected, false)}>
               <IconTrash className="h-3.5 w-3.5" />
               Delete selected
@@ -225,10 +252,19 @@ function ProjectSection({
             </Button>
           </div>
         ) : (
-          <Button size="sm" variant="ghost" className="text-danger hover:bg-danger-bg hover:text-danger" disabled={busy} onClick={onDeleteProject}>
-            <IconTrash className="h-3.5 w-3.5" />
-            Delete project
-          </Button>
+          <div className="flex items-center gap-1.5">
+            <MoveControl label="Move to…" others={others} busy={busy} onMove={(to) => onMove(undefined, to)} />
+            <Button
+              size="sm"
+              variant="ghost"
+              className="text-danger hover:bg-danger-bg hover:text-danger"
+              disabled={busy}
+              onClick={onDeleteProject}
+            >
+              <IconTrash className="h-3.5 w-3.5" />
+              Delete project
+            </Button>
+          </div>
         )}
       </header>
 
@@ -271,6 +307,66 @@ function ProjectSection({
         </div>
       )}
     </section>
+  );
+}
+
+function MoveControl({
+  label,
+  others,
+  busy,
+  onMove,
+}: {
+  label: string;
+  others: ProjectSummary[];
+  busy: boolean;
+  onMove: (to: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [to, setTo] = useState('');
+
+  if (others.length === 0) return null;
+
+  if (!open) {
+    return (
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={busy}
+        onClick={() => {
+          setTo(others[0].key);
+          setOpen(true);
+        }}
+      >
+        <IconFolder className="h-3.5 w-3.5" />
+        {label}
+      </Button>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <Select size="sm" value={to} onChange={(e) => setTo(e.target.value)} aria-label="Target project">
+        {others.map((p) => (
+          <option key={p.key} value={p.key}>
+            {p.name}
+          </option>
+        ))}
+      </Select>
+      <Button
+        size="sm"
+        variant="primary"
+        disabled={busy || !to}
+        onClick={() => {
+          onMove(to);
+          setOpen(false);
+        }}
+      >
+        Move
+      </Button>
+      <Button size="sm" variant="ghost" disabled={busy} onClick={() => setOpen(false)}>
+        Cancel
+      </Button>
+    </div>
   );
 }
 

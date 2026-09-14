@@ -15,6 +15,7 @@ export class ReviewStore {
     version: number;
     origin: Review['origin'];
     cwd: string;
+    agentCwd?: string;
     toolUseId?: string;
   }): Promise<Review> {
     const review: Review = {

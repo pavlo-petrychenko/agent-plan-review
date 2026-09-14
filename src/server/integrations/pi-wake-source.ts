@@ -23,6 +23,7 @@ export const PI_WAKE_EXTENSION_SOURCE = `/**
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 const HEARTBEAT_TTL_MS = 90000;
 const SCAN_DEBOUNCE_MS = 100;
@@ -128,7 +129,29 @@ export default function (pi) {
     );
   }
 
-  function scan(initial) {
+  /** Repo/worktree root for a path (null when not inside a git repo). */
+function gitToplevel(cwd) {
+  try {
+    const out = execFileSync('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5000,
+    }).trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Same project? Plans recorded through a subdirectory resolve to the repo root,
+ * so compare resolved roots rather than raw paths.
+ */
+function sameProject(a, b) {
+  return (gitToplevel(a) || path.resolve(a)) === (gitToplevel(b) || path.resolve(b));
+}
+
+function scan(initial) {
     for (const entry of scanReviews(reviewsDir)) {
       const prev = seen.get(entry.id);
       seen.set(entry.id, entry.review.status || 'pending');
@@ -137,7 +160,7 @@ export default function (pi) {
       const status = entry.review.status;
       if (!status || status === 'pending' || status === prev) continue;
       if (entry.review.origin === 'hook') continue; // hook flow blocks natively
-      if (entry.review.cwd && path.resolve(entry.review.cwd) !== path.resolve(process.cwd())) continue;
+      if (entry.review.cwd && !sameProject(entry.review.cwd, process.cwd())) continue;
       decide(entry.review);
     }
   }

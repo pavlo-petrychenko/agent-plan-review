@@ -13,6 +13,7 @@
 import { APP_NAME, APP_VERSION, checkProgressIntervalMs, loadConfig, maxCheckWaitSeconds } from '../config.js';
 import { PlanReviewStore } from '../store/store.js';
 import { PlanValidationError } from '../util/errors.js';
+import { sameProjectCwd } from '../util/project-cwd.js';
 import { compileIssues } from '../../shared/compile.js';
 import type { Review } from '../../shared/types.js';
 import { ensureServerRunning } from './spawn-server.js';
@@ -36,7 +37,7 @@ const TOOLS = [
       type: 'object',
       required: ['cwd'],
       properties: {
-        cwd: { type: 'string', description: 'Absolute path of the project directory the plan belongs to.' },
+        cwd: { type: 'string', description: 'Absolute path of the repo/worktree ROOT the plan belongs to (its git toplevel). Subdirectories are folded into the containing project automatically.' },
         name: { type: 'string', description: 'Optional display name for the project.' },
         markdown: { type: 'string', description: 'Single-document plan markdown.' },
         plan: { type: 'string', description: 'Raw plan string (markers allowed); treated like markdown.' },
@@ -264,7 +265,11 @@ export async function runMcpServer(): Promise<void> {
       return (await store.getReview(args.reviewId)) ?? undefined;
     }
     const pending = await store.listReviews({ status: 'pending' });
-    const match = pending.find((r) => r.cwd === process.cwd()) ?? pending[0];
+    const cwd = process.cwd();
+    const match =
+      pending.find(
+        (r) => sameProjectCwd(r.cwd, cwd) || (r.agentCwd != null && sameProjectCwd(r.agentCwd, cwd)),
+      ) ?? pending[0];
     return match;
   }
 }

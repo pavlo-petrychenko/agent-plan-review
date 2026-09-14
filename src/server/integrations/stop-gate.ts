@@ -19,6 +19,7 @@ import path from 'node:path';
 
 import { loadConfig } from '../config.js';
 import { PlanReviewStore } from '../store/store.js';
+import { sameProjectCwd } from '../util/project-cwd.js';
 import { readStdinJson, finish } from './hook-io.js';
 
 const RECENT_WINDOW_MS = 5 * 3600 * 1000;
@@ -78,10 +79,12 @@ export async function runStopGate(): Promise<void> {
     const store = new PlanReviewStore(cfg);
     const pending = await store.listReviews({ status: 'pending' });
     const now = Date.now();
+    const sessionCwd = input.cwd ?? process.cwd();
     const match = pending.find(
       (r) =>
         (r.origin === 'mcp' || r.origin === 'api') &&
-        r.cwd === (input.cwd ?? process.cwd()) &&
+        (sameProjectCwd(r.cwd, sessionCwd) ||
+          (r.agentCwd != null && sameProjectCwd(r.agentCwd, sessionCwd))) &&
         now - Date.parse(r.createdAt) < RECENT_WINDOW_MS,
     );
     if (!match) return finish({});
