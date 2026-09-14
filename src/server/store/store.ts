@@ -3,8 +3,12 @@ import type {
   Comment,
   CreateCommentInput,
   DecisionResponse,
+  DiffDocEntry,
+  DiffDocStatus,
+  DiffResponse,
   DocPayload,
   Manifest,
+  MoveVersionsResponse,
   ProjectDetail,
   ProjectMeta,
   ProjectSummary,
@@ -21,7 +25,7 @@ import { VersionStore } from './versions.js';
 import { recordPlan, type RecordInput, type RecordOutput } from './record.js';
 import { compileApproval, compileRejection } from '../../shared/compile.js';
 import { renderMarkdown } from '../render/markdown.js';
-import { conflict, notFound } from '../util/errors.js';
+import { conflict, notFound, badRequest } from '../util/errors.js';
 
 /**
  * Facade over the storage layer used by API routes and integrations.
@@ -113,12 +117,68 @@ export class PlanReviewStore {
     if (!ok) throw notFound('Comment');
   }
 
-  /** Raw markdown of a doc (or whole plan for single versions). Missing side ⇒ "". */
-  async getMarkdownForDiff(key: string, n: number, doc: string): Promise<string> {
-    const meta = await this.versions.readMeta(key, n);
-    if (!meta) throw notFound('Version');
-    if (meta.kind === 'single') return doc === 'root' ? ((await this.versions.readMarkdown(key, n)) ?? '') : '';
-    return (await this.versions.readDoc(key, n, doc)) ?? '';
+  /**
+   * Whole-plan diff payload: every document of both sides, so the reviewer can
+   * see all pages of a revision in one pass instead of switching documents.
+   */
+  async getDiffPayload(key: string, from: number, to: number): Promise<DiffResponse> {
+    const [fromMeta, toMeta, fromManifest, toManifest] = await Promise.all([
+      this.versions.readMeta(key, from),
+      this.versions.readMeta(key, to),
+      this.versions.readManifest(key, from),
+      this.versions.readManifest(key, to),
+    ]);
+    if (!fromMeta) throw notFound('Version');
+    if (!toMeta) throw notFound('Version');
+
+    const fromDocs = await this.docBodies(key, from, fromMeta.kind, fromManifest);
+    const toDocs = await this.docBodies(key, to, toMeta.kind, toManifest);
+
+    // New-side order first, then documents that only exist on the base side.
+    const slugs = [...toDocs.keys(), ...[...fromDocs.keys()].filter((s) => !toDocs.has(s))];
+    const docs: DiffDocEntry[] = slugs.map((slug) => {
+      const fromMd = fromDocs.get(slug);
+      const toMd = toDocs.get(slug);
+      const toDoc = toManifest?.docs.find((d) => d.slug === slug);
+      const fromDoc = fromManifest?.docs.find((d) => d.slug === slug);
+      const status: DiffDocStatus =
+        fromMd == null ? 'added' : toMd == null ? 'removed' : fromMd === toMd ? 'unchanged' : 'modified';
+      const entry: DiffDocEntry = {
+        slug,
+        title: (toMd == null ? fromDoc?.title : toDoc?.title) ?? (slug === 'root' ? 'Plan' : slug),
+        parent: (toMd == null ? fromDoc?.parent : toDoc?.parent) ?? null,
+        status,
+      };
+      if (status !== 'unchanged') {
+        entry.from = fromMd ?? '';
+        entry.to = toMd ?? '';
+      }
+      return entry;
+    });
+
+    return {
+      from: { n: from, manifest: fromManifest ?? undefined },
+      to: { n: to, manifest: toManifest ?? undefined },
+      docs,
+    };
+  }
+
+  /** slug → source text for one side of a diff (single versions act as `root`). */
+  private async docBodies(
+    key: string,
+    n: number,
+    kind: string,
+    manifest: Manifest | null,
+  ): Promise<Map<string, string>> {
+    const map = new Map<string, string>();
+    if (kind === 'single' || !manifest) {
+      map.set('root', (await this.versions.readMarkdown(key, n)) ?? '');
+      return map;
+    }
+    for (const doc of manifest.docs) {
+      map.set(doc.slug, (await this.versions.readDoc(key, n, doc.slug)) ?? '');
+    }
+    return map;
   }
 
   async getManifest(key: string, n: number): Promise<Manifest | null> {
@@ -140,7 +200,14 @@ export class PlanReviewStore {
 
     const comments = await this.comments.list(review.projectKey, review.version);
     const manifest = (await this.versions.readManifest(review.projectKey, review.version)) ?? undefined;
-    const resolve = await this.lineSliceResolver(review.projectKey, review.version, manifest);
+    // Diff-anchored comments can point at a base version's removed lines, so
+    // the resolver needs that version's text too.
+    const baseVersions = [
+      ...new Set(
+        comments.filter((c) => c.side === 'old' && c.baseVersion != null).map((c) => c.baseVersion!),
+      ),
+    ];
+    const resolve = await this.lineSliceResolver(review.projectKey, review.version, manifest, baseVersions);
 
     let payload: { notes?: string; reason?: string };
     if (decision === 'approve') {
@@ -165,17 +232,28 @@ export class PlanReviewStore {
     key: string,
     n: number,
     manifest?: Manifest,
-  ): Promise<(doc: string, line: number, lineEnd: number) => string | null> {
+    baseVersions: number[] = [],
+  ): Promise<(doc: string, line: number, lineEnd: number, baseVersion?: number) => string | null> {
     // Pre-resolve every doc body once; the returned resolver is synchronous.
     const cache = new Map<string, string[]>();
-    const docsToLoad = manifest ? manifest.docs.map((d) => d.slug) : ['root'];
-    for (const slug of docsToLoad) {
-      const raw =
-        manifest == null ? await this.versions.readMarkdown(key, n) : await this.versions.readDoc(key, n, slug);
-      if (raw != null) cache.set(slug, raw.split('\n'));
+    const load = async (version: number, manifestOf: Manifest | undefined): Promise<void> => {
+      const docsToLoad = manifestOf ? manifestOf.docs.map((d) => d.slug) : ['root'];
+      for (const slug of docsToLoad) {
+        const raw =
+          manifestOf == null
+            ? await this.versions.readMarkdown(key, version)
+            : await this.versions.readDoc(key, version, slug);
+        if (raw != null) cache.set(`${version}:${slug}`, raw.split('\n'));
+      }
+    };
+    await load(n, manifest);
+    for (const base of baseVersions) {
+      if (base === n) continue;
+      const baseManifest = (await this.versions.readManifest(key, base)) ?? undefined;
+      await load(base, baseManifest);
     }
-    return (doc, line, lineEnd) => {
-      const lines = cache.get(doc);
+    return (doc, line, lineEnd, baseVersion) => {
+      const lines = cache.get(`${baseVersion ?? n}:${doc}`);
       if (!lines) return null;
       const slice = lines.slice(Math.max(0, line - 1), lineEnd);
       return slice.join('\n').trim() || null;
@@ -201,6 +279,7 @@ export class PlanReviewStore {
     }
 
     await this.versions.deleteFiles(key, n);
+    await this.comments.drop(key, n);
     const projectRemoved = await this.recomputeAfterDeletion(meta);
     return { projectRemoved };
   }
@@ -227,12 +306,64 @@ export class PlanReviewStore {
         continue;
       }
       await this.versions.deleteFiles(key, n);
+      await this.comments.drop(key, n);
       deleted.push(n);
     }
 
     const projectRemoved = await this.recomputeAfterDeletion(meta);
     const freshMeta = projectRemoved ? null : await this.projects.get(key);
     return { deleted, blocked, meta: freshMeta };
+  }
+
+  /**
+   * Move versions (all of them by default) into another project, renumbering
+   * them onto the target's sequence. Comments travel with their version and
+   * reviews are re-pointed, so a pending decision still resolves correctly.
+   * Used to repair plans that were recorded under a stray project key.
+   */
+  async moveVersions(fromKey: string, toKey: string, ns?: number[]): Promise<MoveVersionsResponse> {
+    if (fromKey === toKey) throw badRequest('Source and target projects are the same');
+    const fromMeta = await this.projects.get(fromKey);
+    if (!fromMeta) throw notFound('Project');
+    const toMeta = await this.projects.get(toKey);
+    if (!toMeta) throw notFound('Target project');
+
+    const available = await this.versions.listMetas(fromKey);
+    const selected = ns && ns.length > 0 ? available.filter((v) => ns.includes(v.n)) : available;
+    if (selected.length === 0) throw badRequest('No versions to move');
+
+    let next = await this.versions.maxSurvivor(toKey);
+    const moved: { from: number; to: number }[] = [];
+    for (const version of selected) {
+      next += 1;
+      const manifest = version.kind === 'tree' ? await this.versions.readManifest(fromKey, version.n) : null;
+      const docBodies = new Map<string, string>();
+      if (manifest) {
+        for (const doc of manifest.docs) {
+          docBodies.set(doc.slug, (await this.versions.readDoc(fromKey, version.n, doc.slug)) ?? '');
+        }
+      }
+      await this.versions.write(toKey, {
+        n: next,
+        kind: version.kind,
+        hash: version.hash,
+        createdAt: version.createdAt,
+        markdown:
+          version.kind === 'single' ? ((await this.versions.readMarkdown(fromKey, version.n)) ?? '') : undefined,
+        manifest: manifest ?? undefined,
+        docBodies,
+      });
+      await this.comments.move(fromKey, version.n, toKey, next);
+      for (const review of await this.reviews.list({ projectKey: fromKey, version: version.n })) {
+        await this.reviews.update(review.id, { projectKey: toKey, version: next });
+      }
+      await this.versions.deleteFiles(fromKey, version.n);
+      moved.push({ from: version.n, to: next });
+    }
+
+    const sourceRemoved = await this.recomputeAfterDeletion(fromMeta);
+    await this.recomputeAfterDeletion(toMeta);
+    return { to: toKey, moved, sourceRemoved };
   }
 
   async deleteProject(key: string, force: boolean): Promise<void> {

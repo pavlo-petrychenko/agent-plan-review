@@ -1,7 +1,7 @@
 import type { Comment, CreateCommentInput, Manifest, VersionInfo } from '../../shared/types.js';
 import { MAX_QUOTE_LEN } from '../../shared/types.js';
 import type { Layout } from './paths.js';
-import { readJson, writeJson } from '../util/fs.js';
+import { readJson, removePath, writeJson } from '../util/fs.js';
 
 /** Comment persistence: one JSON file per version. */
 export class CommentStore {
@@ -23,6 +23,7 @@ export class CommentStore {
       body: input.body.trim(),
       author: 'me',
       createdAt: new Date().toISOString(),
+      ...(input.side === 'old' ? { side: input.side, baseVersion: input.baseVersion } : {}),
     };
     comments.push(comment);
     await writeJson(this.layout.commentsFile(projectKey, n), comments);
@@ -35,6 +36,19 @@ export class CommentStore {
     if (next.length === comments.length) return false;
     await writeJson(this.layout.commentsFile(projectKey, n), next);
     return true;
+  }
+
+  /** Carry a version's comments to another project/version (move between projects). */
+  async move(fromKey: string, fromN: number, toKey: string, toN: number): Promise<number> {
+    const comments = await this.list(fromKey, fromN);
+    if (comments.length > 0) await writeJson(this.layout.commentsFile(toKey, toN), comments);
+    await removePath(this.layout.commentsFile(fromKey, fromN));
+    return comments.length;
+  }
+
+  /** Drop every comment on a version (used when its files are deleted). */
+  async drop(projectKey: string, n: number): Promise<void> {
+    await removePath(this.layout.commentsFile(projectKey, n));
   }
 
   /** Default document slug for new comments on a version. */

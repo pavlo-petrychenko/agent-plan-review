@@ -7,6 +7,8 @@ export interface WriteVersionInput {
   n: number;
   kind: VersionKind;
   hash: string;
+  /** Preserve the original timestamp when a version is moved between projects. */
+  createdAt?: string;
   /** For single versions. */
   markdown?: string;
   /** For tree versions (ordered). */
@@ -26,7 +28,7 @@ export class VersionStore {
     await ensureDir(this.layout.versionsDir(projectKey));
     const info: VersionInfo = {
       n,
-      createdAt: new Date().toISOString(),
+      createdAt: input.createdAt ?? new Date().toISOString(),
       kind,
       docCount: kind === 'tree' ? (input.manifest?.docs.length ?? 0) : 1,
       hash,

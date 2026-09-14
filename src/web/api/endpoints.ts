@@ -14,6 +14,7 @@ import type {
   DiffResponse,
   DocPayload,
   GistBinding,
+  MoveVersionsResponse,
   ProjectDetail,
   ProjectSummary,
   Review,
@@ -31,7 +32,7 @@ export const keys = {
   reviewsPending: 'reviews:pending',
   channels: 'channels',
   storage: (key: string) => `storage:${key}`,
-  diff: (key: string, from: number, to: number, doc: string) => `diff:${key}:${from}:${to}:${doc}`,
+  diff: (key: string, from: number, to: number) => `diff:${key}:${from}:${to}`,
 };
 
 export const endpoints = {
@@ -56,10 +57,11 @@ export const endpoints = {
   deleteComment: (key: string, n: number, id: string) =>
     api.del<{ ok: true }>(`/api/projects/${encodeURIComponent(key)}/versions/${n}/comments/${id}`),
 
-  getDiff: (key: string, from: number, to: number, doc?: string) =>
-    api.get<DiffResponse>(
-      `/api/projects/${encodeURIComponent(key)}/diff?from=${from}&to=${to}${doc ? `&doc=${encodeURIComponent(doc)}` : ''}`,
-    ),
+  getDiff: (key: string, from: number, to: number) =>
+    api.get<DiffResponse>(`/api/projects/${encodeURIComponent(key)}/diff?from=${from}&to=${to}`),
+
+  moveVersions: (key: string, to: string, versions?: number[]) =>
+    api.post<MoveVersionsResponse>(`/api/projects/${encodeURIComponent(key)}/move`, { to, versions }),
 
   getReview: (id: string) => api.get<Review>(`/api/reviews/${encodeURIComponent(id)}`),
 

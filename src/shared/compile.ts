@@ -13,8 +13,12 @@ import type { Comment, PlanIssue } from './types.js';
 import type { Manifest } from './types.js';
 
 export interface LineSliceResolver {
-  /** Return the raw text of lines [line, lineEnd] (1-based, inclusive) or null. */
-  (doc: string, line: number, lineEnd: number): string | null;
+  /**
+   * Return the raw text of lines [line, lineEnd] (1-based, inclusive) or null.
+   * `baseVersion` selects the base-version text for old-side (removed-line)
+   * anchors; absent means the reviewed version.
+   */
+  (doc: string, line: number, lineEnd: number, baseVersion?: number): string | null;
 }
 
 function docTitle(manifest: Manifest | undefined, slug: string): string {
@@ -48,19 +52,29 @@ function snippet(text: string): string {
   return one.length > SNIPPET_MAX ? `${one.slice(0, SNIPPET_MAX - 1)}…` : one;
 }
 
-function lineLabel(line: number | null, lineEnd: number | null): string {
+function lineLabel(comment: Comment): string {
+  const { line, lineEnd, side, baseVersion } = comment;
   if (line == null) return '';
-  if (lineEnd == null || lineEnd <= line) return `[line ${line}]`;
-  return `[lines ${line}-${lineEnd}]`;
+  const range = lineEnd == null || lineEnd <= line ? `line ${line}` : `lines ${line}-${lineEnd}`;
+  if (side === 'old') return `[removed${baseVersion ? ` in v${baseVersion}` : ''}, ${range}]`;
+  return `[${range}]`;
 }
 
 function formatLineComment(c: Comment, resolve: LineSliceResolver): string {
-  const label = lineLabel(c.line, c.lineEnd);
+  const label = lineLabel(c);
   const quoteSource =
     c.quote?.trim() ||
-    (c.line != null ? snippet(resolve(c.doc, c.line, c.lineEnd ?? c.line) ?? '') : '');
+    (c.line != null
+      ? snippet(resolve(c.doc, c.line, c.lineEnd ?? c.line, c.side === 'old' ? c.baseVersion : undefined) ?? '')
+      : '');
   const quoted = quoteSource ? ` "${quoteSource}"` : '';
   return `- ${label}${quoted} → ${c.body.trim()}`;
+}
+
+/** New-side comments first, then removed-line comments — two line spaces. */
+function bySideThenLine(a: Comment, b: Comment): number {
+  const side = (c: Comment) => (c.side === 'old' ? 1 : 0);
+  return side(a) - side(b) || a.line! - b.line! || (a.lineEnd ?? a.line)! - (b.lineEnd ?? b.line)!;
 }
 
 export type ResubmitChannel = 'ExitPlanMode' | 'plan_review_submit';
@@ -93,7 +107,7 @@ export function compileRejection(
     const docComments = comments.filter((c) => c.doc === slug);
     const line = docComments
       .filter((c) => c.line != null)
-      .sort((a, b) => (a.line! - b.line!) || ((a.lineEnd ?? a.line)! - (b.lineEnd ?? b.line)!));
+      .sort(bySideThenLine);
     const general = docComments.filter((c) => c.line == null);
     sections.push(sectionHeader(manifest, slug));
     for (const c of line) sections.push(formatLineComment(c, resolve));
@@ -122,7 +136,7 @@ export function compileApproval(
     const docComments = comments.filter((c) => c.doc === slug);
     const line = docComments
       .filter((c) => c.line != null)
-      .sort((a, b) => (a.line! - b.line!) || ((a.lineEnd ?? a.line)! - (b.lineEnd ?? b.line)!));
+      .sort(bySideThenLine);
     const general = docComments.filter((c) => c.line == null);
     sections.push(sectionHeader(manifest, slug, 'Notes'));
     for (const c of line) sections.push(formatLineComment(c, resolve));

@@ -36,12 +36,16 @@ export function CommentCard({
   comment,
   onDelete,
   onLocate,
+  label,
 }: {
   comment: Comment;
   onDelete: () => void;
   onLocate?: () => void;
+  /** Extra context for diff-anchored comments (e.g. "removed in v9"). */
+  label?: string;
 }) {
   const anchored = comment.line != null;
+  const anchorLabel = label ?? formatLineLabel(comment.line, comment.lineEnd);
   return (
     <div className="group rounded-xl border border-border bg-surface-1 shadow-card transition-colors hover:border-border-strong">
       <div className="flex items-center gap-2 border-b border-border px-3.5 py-2">
@@ -53,10 +57,14 @@ export function CommentCard({
         {anchored && (
           <button
             onClick={onLocate}
+            disabled={!onLocate}
             title="Jump to location"
-            className="rounded-full bg-surface-2 px-2 py-0.5 font-mono text-[10.5px] text-ink-muted transition-colors hover:bg-surface-3 hover:text-ink"
+            className={cx(
+              'rounded-full bg-surface-2 px-2 py-0.5 font-mono text-[10.5px] text-ink-muted transition-colors',
+              onLocate && 'hover:bg-surface-3 hover:text-ink',
+            )}
           >
-            {formatLineLabel(comment.line, comment.lineEnd)}
+            {anchorLabel}
           </button>
         )}
         <span className="flex-1" />

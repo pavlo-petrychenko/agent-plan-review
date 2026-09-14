@@ -9,7 +9,7 @@ import { useReviewPoll } from './hooks/useReviewPoll.js';
 import { Header } from './components/nav/Header.js';
 import { Sidebar } from './components/nav/SidebarShell.js';
 import { PreviewPane, type SectionFilter } from './components/preview/PreviewPane.js';
-import { DiffView } from './components/diff/DiffView.js';
+import { DiffView, type DiffCommentInput } from './components/diff/DiffView.js';
 import { ReviewBar } from './components/review/ReviewBar.js';
 import { GistDialog } from './components/gist/GistDialog.js';
 import { ManageModal } from './components/manage/ManageModal.js';
@@ -108,13 +108,26 @@ function ReviewWorkspace() {
 
   // --- mutations -----------------------------------------------------------
   const addComment = useCallback(
-    async (input: { body: string; quote: string | null; line: number | null; lineEnd: number | null }) => {
+    async (input: {
+      body: string;
+      quote: string | null;
+      line: number | null;
+      lineEnd: number | null;
+      doc?: string;
+      side?: 'old' | 'new';
+      baseVersion?: number;
+    }) => {
       if (!projectKey || !version) return;
-      await endpoints.addComment(projectKey, version, { ...input, doc: docSlug ?? undefined });
+      await endpoints.addComment(projectKey, version, { ...input, doc: input.doc ?? docSlug ?? undefined });
       invalidate(`comments:${projectKey}:${version}`);
       toast('Comment added', 'success');
     },
     [projectKey, version, docSlug, toast],
+  );
+
+  const addDiffComment = useCallback(
+    (input: DiffCommentInput) => addComment(input),
+    [addComment],
   );
 
   const deleteComment = useCallback(
@@ -255,6 +268,9 @@ function ReviewWorkspace() {
                 versions={versions ?? []}
                 activeVersion={version ?? 0}
                 activeDoc={docSlug}
+                comments={allComments}
+                onAddComment={addDiffComment}
+                onDeleteComment={deleteComment}
               />
             ) : (
               <PreviewPane

@@ -1,3 +1,5 @@
+import type { Mermaid } from 'mermaid';
+
 /**
  * Client-side Mermaid rendering for fenced ```mermaid blocks.
  *
@@ -18,7 +20,7 @@
  * changes, so this is safe to call after every relevant render pass.
  */
 
-type MermaidApi = (typeof import('mermaid'))['default'];
+type MermaidApi = Mermaid;
 
 let mermaidLoad: Promise<MermaidApi> | null = null;
 

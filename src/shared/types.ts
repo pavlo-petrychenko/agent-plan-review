@@ -25,6 +25,14 @@ export interface Comment {
   line: number | null;
   /** Last source line of the anchor; null for general comments. */
   lineEnd: number | null;
+  /**
+   * Which side of a version diff the anchor points at. Absent means 'new' (the
+   * reviewed version); 'old' means a line of `baseVersion` that the diff showed
+   * as removed — the anchor cannot be resolved against the reviewed version.
+   */
+  side?: 'old' | 'new';
+  /** Base version an 'old'-side anchor refers to. */
+  baseVersion?: number;
   /** Verbatim selected text, whitespace-normalized, capped at MAX_QUOTE_LEN. */
   quote: string | null;
   body: string;
@@ -82,6 +90,8 @@ export interface Review {
   status: ReviewStatus;
   origin: ReviewOrigin;
   cwd: string;
+  /** Raw cwd the agent submitted, kept for diagnostics when it was folded. */
+  agentCwd?: string;
   createdAt: string;
   resolvedAt?: string;
   /** Compiled feedback attached when rejected. */
@@ -152,12 +162,38 @@ export interface CreateCommentInput {
   lineEnd?: number | null;
   quote?: string | null;
   body: string;
+  side?: 'old' | 'new';
+  baseVersion?: number;
+}
+
+export type DiffDocStatus = 'added' | 'removed' | 'modified' | 'unchanged';
+
+/** One document's slice of a version-to-version diff. */
+export interface DiffDocEntry {
+  slug: string;
+  /** Title on the new side; falls back to the base title for removed docs. */
+  title: string;
+  parent: string | null;
+  status: DiffDocStatus;
+  /** Base-side source text ('' when the document did not exist yet). */
+  from?: string;
+  /** New-side source text ('' when the document was removed). */
+  to?: string;
 }
 
 export interface DiffResponse {
-  doc: string;
-  from: { markdown: string };
-  to: { markdown: string };
+  from: { n: number; manifest?: Manifest };
+  to: { n: number; manifest?: Manifest };
+  /** Every document of the union, in new-side order then removed docs. */
+  docs: DiffDocEntry[];
+}
+
+export interface MoveVersionsResponse {
+  /** Target project key. */
+  to: string;
+  moved: { from: number; to: number }[];
+  /** True when the source project had no versions left and was removed. */
+  sourceRemoved: boolean;
 }
 
 export interface SaveRequest {

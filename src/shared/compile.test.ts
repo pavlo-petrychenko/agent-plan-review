@@ -87,3 +87,18 @@ test('rejection names the requested re-submit channel', () => {
   const issuesMcp = compileIssues([{ message: 'x' }], 'plan_review_submit');
   assert.match(issuesMcp, /via plan_review_submit\./);
 });
+
+test('old-side (diff-anchored) comments are labelled as removed and quote the base version', () => {
+  const comments = [
+    c({ line: 41, lineEnd: 42, side: 'old', baseVersion: 9, body: 'why drop the rollout?' }),
+    c({ line: 10, body: 'new-side note' }),
+  ];
+  const resolve = (_doc: string, line: number, lineEnd: number, baseVersion?: number): string =>
+    baseVersion === 9 ? `base ${line}-${lineEnd}` : `current ${line}`;
+
+  const out = compileRejection(comments, manifest, resolve, 10);
+  assert.match(out, /\[removed in v9, lines 41-42\] "base 41-42" → why drop the rollout\?/);
+  assert.match(out, /\[line 10\] "current 10" → new-side note/);
+  // Removed-line comments come after current-line comments.
+  assert.ok(out.indexOf('new-side note') < out.indexOf('why drop the rollout'));
+});

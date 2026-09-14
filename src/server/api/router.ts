@@ -43,6 +43,19 @@ export function createApiRouter(store: PlanReviewStore): Router {
     res.json({ ok: true });
   }));
 
+  api.post('/projects/:key/move', wrap(async (req, res) => {
+    const to = req.body?.to;
+    if (typeof to !== 'string' || !to.trim()) throw badRequest('body.to (target project key) is required');
+    const versions = req.body?.versions;
+    if (
+      versions != null &&
+      (!Array.isArray(versions) || versions.some((v) => !Number.isInteger(v)))
+    ) {
+      throw badRequest('body.versions must be an array of integers when provided');
+    }
+    res.json(await store.moveVersions(req.params.key, to.trim(), versions as number[] | undefined));
+  }));
+
   api.post('/projects/:key/bulk-delete', wrap(async (req, res) => {
     const versions = req.body?.versions;
     if (!Array.isArray(versions) || versions.some((v) => !Number.isInteger(v))) {
@@ -143,18 +156,7 @@ export function createApiRouter(store: PlanReviewStore): Router {
     const from = Number.parseInt(String(req.query.from ?? ''), 10);
     const to = Number.parseInt(String(req.query.to ?? ''), 10);
     if (!Number.isInteger(from) || !Number.isInteger(to)) throw badRequest('from and to are required integers');
-
-    const fromManifest = await store.getManifest(key, from);
-    const toManifest = await store.getManifest(key, to);
-    if (!fromManifest && !(await store.versions.readMeta(key, from))) throw notFound('Version');
-    if (!toManifest && !(await store.versions.readMeta(key, to))) throw notFound('Version');
-
-    const doc = resolveDiffDoc(req.query.doc, fromManifest, toManifest);
-    res.json({
-      doc,
-      from: { markdown: await store.getMarkdownForDiff(key, from, doc) },
-      to: { markdown: await store.getMarkdownForDiff(key, to, doc) },
-    });
+    res.json(await store.getDiffPayload(key, from, to));
   }));
 
   // -------------------------------------------------------------------------
@@ -215,7 +217,15 @@ export function createApiRouter(store: PlanReviewStore): Router {
 // helpers
 // -----------------------------------------------------------------------------
 
-function validateCommentBody(body: unknown): { doc?: string; line?: number | null; lineEnd?: number | null; quote?: string | null; body: string } {
+function validateCommentBody(body: unknown): {
+  doc?: string;
+  line?: number | null;
+  lineEnd?: number | null;
+  quote?: string | null;
+  body: string;
+  side?: 'old' | 'new';
+  baseVersion?: number;
+} {
   const b = body as Record<string, unknown>;
   if (typeof b?.body !== 'string' || !b.body.trim()) throw badRequest('Comment body is required');
   const line = b.line == null ? null : Number(b.line);
@@ -224,40 +234,25 @@ function validateCommentBody(body: unknown): { doc?: string; line?: number | nul
     if (v != null && (!Number.isInteger(v) || v < 1)) throw badRequest(`${label} must be a positive integer`);
   }
   if (line != null && lineEnd != null && lineEnd < line) throw badRequest('lineEnd must be ≥ line');
+
+  const side = b.side === 'old' || b.side === 'new' ? b.side : undefined;
+  const baseVersion = b.baseVersion == null ? undefined : Number(b.baseVersion);
+  if (baseVersion != null && (!Number.isInteger(baseVersion) || baseVersion < 1)) {
+    throw badRequest('baseVersion must be a positive integer');
+  }
+  if (side === 'old' && baseVersion == null) {
+    throw badRequest('baseVersion is required for old-side (removed-line) comments');
+  }
+
   return {
     doc: typeof b.doc === 'string' ? b.doc : undefined,
     line,
     lineEnd,
     quote: typeof b.quote === 'string' ? b.quote : null,
     body: b.body,
+    side,
+    baseVersion,
   };
-}
-
-function resolveDiffDoc(queryDoc: unknown, from: unknown, to: unknown): string {
-  const requested = typeof queryDoc === 'string' && queryDoc ? queryDoc : undefined;
-  const fromSlugs = manifestSlugs(from);
-  const toSlugs = manifestSlugs(to);
-
-  // Flat-vs-flat behaves like a plain two-file diff.
-  if (!fromSlugs && !toSlugs) return 'root';
-
-  const union: string[] = [];
-  const push = (s: string) => {
-    if (!union.includes(s)) union.push(s);
-  };
-  if (requested) push(requested);
-  for (const s of [...(toSlugs ?? ['root']), ...(fromSlugs ?? ['root'])]) push(s);
-
-  if (requested && union.includes(requested)) return requested;
-  // Sensible default: shared root → first available.
-  if (union.includes('root')) return 'root';
-  return union[0] ?? 'root';
-}
-
-function manifestSlugs(manifest: unknown): string[] | null {
-  if (!manifest || typeof manifest !== 'object') return null;
-  const docs = (manifest as { docs?: { slug: string }[] }).docs;
-  return Array.isArray(docs) ? docs.map((d) => d.slug) : null;
 }
 
 async function composeTreeMarkdown(key: string, n: number, store: PlanReviewStore): Promise<string> {

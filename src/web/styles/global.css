@@ -385,3 +385,68 @@ body {
 }
 .diff-add .diff-sign { color: var(--add-fg); }
 .diff-del .diff-sign { color: var(--del-fg); }
+
+/* Per-page header — sticky so the page you are reading stays named. */
+.diff-doc-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  padding: 0.5rem 0.875rem;
+}
+
+/* Hidden unchanged run; the button expands it in place. */
+.diff-gap td {
+  background: var(--surface-2);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 0 !important;
+}
+.diff-gap-btn {
+  width: 100%;
+  padding: 0.125rem 0.5rem;
+  text-align: left;
+  font-size: 11px;
+  color: var(--ink-faint);
+  transition: color 120ms ease;
+}
+.diff-gap-btn:hover {
+  color: var(--accent);
+}
+
+/* Comment affordance sits in the line-number gutter and reveals on hover. */
+.diff-gutter {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.25rem;
+  min-height: 1.55em;
+}
+.diff-gutter-btn {
+  opacity: 0;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 0.25rem;
+  padding: 1px;
+  color: var(--accent);
+  transition: opacity 120ms ease;
+}
+.diff-table tr:hover .diff-gutter-btn,
+.diff-gutter-btn:focus-visible {
+  opacity: 1;
+}
+.diff-gutter-btn:hover {
+  background: var(--accent-soft);
+}
+
+/* Inline threads hang under the row they are anchored to. */
+.diff-thread td {
+  background: var(--surface-0);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 0.375rem 0.75rem !important;
+}
