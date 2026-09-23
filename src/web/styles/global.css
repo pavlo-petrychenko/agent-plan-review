@@ -14,7 +14,10 @@
   --border-strong: #cdd1d9;
   --ink: #191b1f;
   --ink-muted: #565b64;
-  --ink-faint: #9096a0;
+  /* Dark enough to clear WCAG AA (4.5:1) on every surface it is used on
+   * (surface-0/1/2). It carries all the metadata text, so "faint" may not mean
+   * "illegible": see the contrast table in the audit. */
+  --ink-faint: #5f6673;
   --accent: #5457d6;
   --accent-hover: #4649c0;
   --accent-soft: rgba(84, 87, 214, 0.09);
@@ -22,9 +25,11 @@
   --pending: #a16207;
   --pending-bg: rgba(217, 119, 6, 0.12);
   --ok: #15803d;
+  --ok-ink: #ffffff;
   --ok-bg: rgba(22, 163, 74, 0.11);
   --danger: #dc2626;
   --danger-hover: #b91c1c;
+  --danger-ink: #ffffff;
   --danger-bg: rgba(220, 38, 38, 0.09);
   --add-fg: #116932;
   --add-bg: rgba(34, 197, 94, 0.13);
@@ -45,7 +50,8 @@
   --border-strong: #363a42;
   --ink: #e8eaee;
   --ink-muted: #a2a8b3;
-  --ink-faint: #666c77;
+  /* Light enough to clear 4.5:1 on the dark surfaces; still a step below muted. */
+  --ink-faint: #8b919c;
   --accent: #8b8df2;
   --accent-hover: #a3a4f6;
   --accent-soft: rgba(139, 141, 242, 0.13);
@@ -53,9 +59,12 @@
   --pending: #fbbf24;
   --pending-bg: rgba(251, 191, 36, 0.12);
   --ok: #4ade80;
+  /* Fill tokens are LIGHT in dark theme, so their labels need dark ink. */
+  --ok-ink: #0c0d10;
   --ok-bg: rgba(74, 222, 128, 0.11);
   --danger: #f87171;
   --danger-hover: #fca5a5;
+  --danger-ink: #101118;
   --danger-bg: rgba(248, 113, 113, 0.12);
   --add-fg: #6ee7a0;
   --add-bg: rgba(52, 211, 153, 0.12);
@@ -84,9 +93,11 @@
   --color-pending: var(--pending);
   --color-pending-bg: var(--pending-bg);
   --color-ok: var(--ok);
+  --color-ok-ink: var(--ok-ink);
   --color-ok-bg: var(--ok-bg);
   --color-danger: var(--danger);
   --color-danger-hover: var(--danger-hover);
+  --color-danger-ink: var(--danger-ink);
   --color-danger-bg: var(--danger-bg);
   --color-add-fg: var(--add-fg);
   --color-add-bg: var(--add-bg);
@@ -171,6 +182,16 @@ body {
   font-size: 15.5px;
   line-height: 1.75;
   color: var(--ink);
+  /* A plan may contain a 100-char token, a long URL or a base64 blob in prose.
+   * Without this, one unbreakable word gives the whole reading pane a horizontal
+   * scrollbar and shifts every line sideways. `pre` opts out below so code keeps
+   * scrolling instead of breaking mid-token. */
+  overflow-wrap: anywhere;
+}
+.preview-body pre,
+.preview-body pre code {
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .preview-body .md-block > *:first-child {
@@ -286,11 +307,17 @@ body {
   font-size: inherit;
 }
 
+/* Tables: the wrapper scrolls, the table fills the column. Headers stay on one
+ * line (a two-line header next to one-line cells read as a broken table) and
+ * long cell content wraps inside its column. */
+.preview-body .md-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 0.85em 0;
+}
 .preview-body table {
   border-collapse: collapse;
-  display: block;
-  overflow-x: auto;
-  max-width: 100%;
+  width: 100%;
 }
 .preview-body th,
 .preview-body td {
@@ -301,11 +328,117 @@ body {
 .preview-body th {
   background: var(--surface-2);
   font-weight: 600;
+  white-space: nowrap;
 }
 
-.preview-body img {
-  max-width: 100%;
+/* Rendered comment bodies (see server/render/comments.ts). Compact prose: a
+ * comment is a paragraph or two in a card, not a document. */
+.md-comment {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--ink);
+}
+.md-comment > *:first-child {
+  margin-top: 0;
+}
+.md-comment > *:last-child {
+  margin-bottom: 0;
+}
+.md-comment p {
+  margin: 0.5em 0;
+}
+.md-comment ul,
+.md-comment ol {
+  margin: 0.5em 0;
+  padding-left: 1.35em;
+}
+.md-comment ul {
+  list-style: disc;
+}
+.md-comment ol {
+  list-style: decimal;
+}
+.md-comment li + li {
+  margin-top: 0.2em;
+}
+.md-comment a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.md-comment code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1em 0.3em;
+}
+.md-comment pre {
+  margin: 0.6em 0;
+  padding: 0.6em 0.8em;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
   border-radius: 8px;
+  overflow-x: auto;
+  font-size: 12.5px;
+}
+.md-comment pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+.md-comment blockquote {
+  margin: 0.6em 0;
+  border-left: 3px solid var(--border-strong);
+  padding-left: 0.8em;
+  color: var(--ink-muted);
+}
+.md-comment h1,
+.md-comment h2,
+.md-comment h3,
+.md-comment h4 {
+  margin: 0.8em 0 0.35em;
+  font-size: 1.05em;
+  font-weight: 650;
+}
+.md-comment hr {
+  margin: 0.8em 0;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+/* Plan images: a screenshot in the reading column is a review artefact, not
+ * decoration — give it a frame and let it be opened at full size. */
+.preview-body img {
+  display: block;
+  max-width: 100%;
+  margin: 1.1em auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-1);
+  box-shadow: var(--shadow-card);
+  cursor: zoom-in;
+  transition: border-color 120ms ease;
+}
+.preview-body img:hover {
+  border-color: var(--accent);
+}
+
+/* A failed image should look like a deliberate placeholder, not stray text. */
+.preview-body img.md-img-broken {
+  min-height: 4em;
+  padding: 1.4em 1em;
+  border-style: dashed;
+  border-color: var(--border-strong);
+  color: var(--ink-faint);
+  font-size: 12.5px;
+  text-align: center;
+  cursor: default;
+  box-shadow: none;
+}
+.preview-body img.md-img-broken:hover {
+  border-color: var(--border-strong);
 }
 
 /* Rendered mermaid diagrams (see preview/mermaid.ts) */
@@ -318,6 +451,19 @@ body {
 .preview-body .md-mermaid svg {
   max-width: 100%;
   height: auto;
+}
+
+/* Mermaid's theme draws hard square rectangles with its own grey strokes, which
+ * clashes with the app's rounded cards. Geometry is a CSS property on SVG, so
+ * this wins over the presentation attributes. */
+.preview-body .md-mermaid .cluster rect {
+  rx: 10px;
+  ry: 10px;
+  stroke: var(--border-strong);
+}
+.preview-body .md-mermaid .node rect {
+  rx: 6px;
+  ry: 6px;
 }
 
 /* Unrenderable diagram — keep the source visible, flag it */
@@ -368,14 +514,20 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* The gutter must fit the hover comment button (14px) + gap (4px) + a 3-digit
+ * number, or the number wraps onto a second line and doubles the row height.
+ * The td-level `white-space: pre-wrap` is overridden below for this cell only. */
 .diff-ln {
   user-select: none;
   text-align: right;
-  min-width: 3.2em;
+  min-width: 4.6em;
   color: var(--ink-faint);
   background: var(--surface-2);
   border-right: 1px solid var(--border);
   padding-right: 6px !important;
+}
+.diff-table td.diff-ln {
+  white-space: nowrap;
 }
 .diff-add {
   background: var(--add-bg);
@@ -386,17 +538,63 @@ body {
 .diff-add .diff-sign { color: var(--add-fg); }
 .diff-del .diff-sign { color: var(--del-fg); }
 
-/* Per-page header — sticky so the page you are reading stays named. */
+/* Per-page header — sticky so the page you are reading stays named, and the
+ * reviewed toggle stays reachable while scrolling (as on GitHub).
+ * Wraps: at ~400px the title, slug, status, counts and toggle do not fit on one
+ * line, and the toggle must not be pushed off-screen. */
 .diff-doc-header {
   position: sticky;
   top: 0;
   z-index: 10;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
   border-bottom: 1px solid var(--border);
   background: var(--surface-2);
   padding: 0.5rem 0.875rem;
+}
+
+/* Sticky headers must escape the section's overflow clip, or they only stick
+   inside their own (non-scrolling) section. Scroll clipping happens above. */
+.diff-doc {
+  overflow: visible;
+}
+.diff-doc-viewed .diff-doc-header {
+  background: var(--surface-1);
+}
+.diff-doc-viewed .diff-doc-header .text-ink,
+.diff-doc-viewed .diff-doc-header .text-ink-faint {
+  opacity: 0.45;
+}
+.diff-viewed-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border-radius: 0.5rem;
+  padding: 0.2rem 0.55rem;
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.diff-viewed-btn-off {
+  border: 1px solid var(--border-strong);
+  color: var(--ink-muted);
+}
+.diff-viewed-btn-off:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.diff-viewed-btn-on {
+  border: 1px solid transparent;
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+.diff-viewed-btn-on:hover {
+  background: var(--surface-3);
+  color: var(--ink-muted);
 }
 
 /* Hidden unchanged run; the button expands it in place. */
