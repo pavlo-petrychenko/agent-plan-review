@@ -67,9 +67,30 @@ Give the human a real review surface for your plans instead of a terminal yes/no
      revised plan with \`plan_review_submit\`. It becomes the next version and the
      human can diff the two — the diff shows every page at once, and comments may
      target removed lines too (they arrive as \`[removed in vN, lines X-Y]\`).
+   - \`status: "pending"\` **with \`newComments\`** → the human wrote to a comment
+     thread. This is a DISCUSSION, not a change request: answer each one with
+     \`plan_review_reply { "reviewId", "commentId": "<threadId>", "body" }\`, then
+     call \`plan_review_check\` again. The server tracks what you have seen, so you
+     will not be handed the same message twice. Only revise and re-submit the plan
+     if the discussion actually calls for a change.
 
 NEVER short-poll (short waits in a loop) and NEVER re-submit while a review is
 pending — both waste tokens for zero information.
+
+## Threads (questions, not just change requests)
+
+Comments are conversation threads. The human may ask a question on a line, or
+reply to one of your comments; you can answer with \`plan_review_reply\`. Threads
+are not always change requests — answer questions, explain trade-offs, ask for
+clarification. A thread is compiled into your decision feedback until the human
+marks it resolved, so an unanswered question keeps coming back; a resolved one
+drops out. Threads carry forward to the next version, re-anchored, so the
+conversation stays visible on the revised plan.
+
+- Reply with \`plan_review_reply { "reviewId": "<id>", "commentId": "<threadId>", "body": "..." }\`.
+- \`threadId\` comes from the \`newComments\` entries of \`plan_review_check\`.
+- After replying, call \`plan_review_check\` again to wait for the next message or
+  the decision — do not re-submit the plan to answer a question.
 
 ## Multi-document plans
 
@@ -94,6 +115,37 @@ Root content…
 - A single-document plan needs no markers at all.
 
 Invalid plans are rejected with an issue list — fix every issue and re-submit.
+## Images
+
+Screenshots belong in the plan — a reviewer should see the before/after, not read about it.
+
+Attach them with the submission and reference each one from the markdown:
+
+\`\`\`jsonc
+plan_review_submit {
+  "cwd": "/abs/repo",
+  "markdown": "## Fixed\\n\\nBefore:\\n\\n![dark Approve button](image:before)\\n\\nAfter:\\n\\n![readable](image:after)",
+  "images": [
+    { "name": "before", "path": "/tmp/shot-before.png" },
+    { "name": "after", "path": "shots/after.png" }    // relative paths resolve against cwd
+  ]
+}
+\`\`\`
+
+- \`image:<name>\` is rewritten to a served URL before the version is stored, so a
+  re-submission of the same plan can also just link the URL directly.
+- Prefer one image per completed step, captioned with what changed, and keep the alt
+  text meaningful — it is the caption in the full-screen viewer.
+- PNG, JPEG, GIF, WebP, AVIF and SVG; 8 MB each, 60 per submission. The type is
+  sniffed from the bytes, and identical bytes are stored once (content-addressed), so
+  re-attaching the same screenshot across versions costs nothing.
+- A reference to an image nobody attached fails validation by name — it never renders
+  as a broken link.
+- Already uploaded the file? \`plan_review_attach_image { path }\` returns the URL to
+  paste, and \`POST /api/images { dataBase64, name }\` does the same over HTTP.
+- Images are served by the local server, so they render in the review UI but NOT in a
+  gist export (those URLs are local to your machine).
+
 
 ## Claude Code
 

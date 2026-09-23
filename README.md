@@ -86,11 +86,12 @@ Add to `~/.claude/settings.json`:
    agent-plan-review install-skill   # → ~/.pi/agent/skills/agent-plan-review/SKILL.md
    ```
 
-3. Agents use two tools:
+3. Agents use four tools:
 
-   - **`plan_review_submit`** `{ cwd, markdown | plan | docs[] }` → validates and records
+   - **`plan_review_submit`** `{ cwd, markdown | plan | docs[] , images[] }` → validates and records
      through the same store, opens the browser, returns `{ reviewId, reviewUrl,
-     projectKey, version }`.
+     projectKey, version }`. `images[]` (`{ name, path | dataBase64 }`) are stored and
+     `image:<name>` references in the text are rewritten to served URLs.
    - **`plan_review_check`** `{ reviewId?, wait_seconds? }` → TRUE LONG-POLL: returns the
      moment the decision lands or `wait_seconds` elapses (ceiling `AGENT_PLAN_REVIEW_MAX_WAIT`,
      default 172800 s = 48 h). Returns `pending` / `approved (+notes)` / `rejected (+reason)`.
@@ -98,6 +99,10 @@ Add to `~/.claude/settings.json`:
      periodic progress notifications so silent calls survive client idle-timeouts.
      Clients that auto-background long calls (Claude Code after ~2 min) deliver the result
      on their own; the steering text tells agents not to re-call or re-submit then.
+   - **`plan_review_reply`** `{ reviewId, commentId, body }` → answer a human's thread while a
+     review is still pending, without re-submitting the plan.
+   - **`plan_review_attach_image`** `{ path | dataBase64, name? }` → store one image and get
+     back the URL/markdown to embed.
 
 4. Optional zero-poll wake for pi sessions:
 
@@ -145,6 +150,16 @@ Root content…
 - **Annotating** — select any text → thread anchored to those source lines (quotes
   captured verbatim); general notes; comments persist per version and survive
   byte-identical re-presentations (content-hash dedup).
+- **Imaging** — attach screenshots to a plan (`images[]` on submit, `plan_review_attach_image`,
+  or `POST /api/images`). They are content-addressed under the storage root, referenced from the
+  markdown as `image:<name>` (rewritten to a served URL), and open at full size in a viewer with
+  the alt text as its caption. A reference to an image nobody attached fails validation by name
+  instead of rendering a broken link.
+- **Threading** — every comment is a conversation: the agent answers questions on the
+  line with `plan_review_reply`, you reply back, and you resolve a thread when it is
+  done. Agent replies are never compiled into feedback; a thread stays actionable
+  until you resolve it. Open threads carry forward to the next version, re-anchored
+  through the diff, so the discussion stays on the revised plan.
 - **Deciding** — pending/approved/rejected surfaced at all times; buttons only enabled
   when viewing the exact version under review; ~2.5 s polling while pending.
 - **Comparing** — GitHub-style all-pages diff against any base version: every page in
