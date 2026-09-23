@@ -30,8 +30,8 @@ const VARIANTS: Record<ButtonVariant, string> = {
   secondary:
     'bg-surface-2 text-ink border border-border hover:border-border-strong hover:bg-surface-3 font-medium',
   ghost: 'text-ink-muted hover:text-ink hover:bg-surface-2',
-  danger: 'bg-danger text-white hover:bg-danger-hover shadow-sm font-medium disabled:opacity-40',
-  success: 'bg-ok text-white hover:brightness-110 shadow-sm font-medium disabled:opacity-40',
+  danger: 'bg-danger text-danger-ink hover:bg-danger-hover shadow-sm font-medium disabled:opacity-40',
+  success: 'bg-ok text-ok-ink hover:brightness-110 shadow-sm font-medium disabled:opacity-40',
 };
 
 export function Button({ variant = 'secondary', size = 'md', loading, className, children, disabled, ...rest }: ButtonProps) {
