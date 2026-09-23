@@ -13,11 +13,14 @@ import type { ServerConfig } from '../config.js';
  *   projects/<key>/versions/NNNN/<slug>.md     tree doc content
  *   projects/<key>/comments/NNNN.json
  *   projects/<key>/locks/<toolUseId>.lock      double-fire dedup markers
+ *   images/<sha>.png                           content-addressed plan images
  */
 export interface Layout {
   home: string;
   reviewsDir: string;
   projectsDir: string;
+  /** Content-addressed images attached to plans (shared across projects). */
+  imagesDir: string;
   projectDir: (key: string) => string;
   metaFile: (key: string) => string;
   versionsDir: (key: string) => string;
@@ -39,6 +42,7 @@ export function createLayout(cfg: ServerConfig): Layout {
     home,
     reviewsDir: path.join(home, 'reviews'),
     projectsDir: path.join(home, 'projects'),
+    imagesDir: path.join(home, 'images'),
     projectDir: (key) => path.join(home, 'projects', key),
     metaFile: (key) => path.join(home, 'projects', key, 'meta.json'),
     versionsDir: (key) => path.join(home, 'projects', key, 'versions'),
