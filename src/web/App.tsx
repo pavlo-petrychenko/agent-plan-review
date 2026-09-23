@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Comment, GistBinding } from '../shared/types.js';
+import { actionableComments } from '../shared/compile.js';
 import { invalidate, useApi } from './api/cache.js';
 import { endpoints, keys } from './api/endpoints.js';
 import { useParams, useSetParams } from './state/url.js';
@@ -15,7 +16,7 @@ import { GistDialog } from './components/gist/GistDialog.js';
 import { ManageModal } from './components/manage/ManageModal.js';
 import { OutlineBanner } from './components/nav/Sidebar.js';
 import { Button, EmptyState, ErrorNote, Spinner, cx } from './components/primitives.js';
-import { IconDiff, IconEye, IconPlus } from './components/icons.js';
+import { IconDiff, IconEye, IconList, IconPlus, IconX } from './components/icons.js';
 
 export function App() {
   return (
@@ -65,6 +66,18 @@ function ReviewWorkspace() {
     null;
   const { review } = useReviewPoll(contextualReviewId);
 
+  // EVERY version with an open review, not just the contextual one: the header pill
+  // counts them all, while the rail used to mark only the review in the URL.
+  const pendingVersions = useMemo(
+    () =>
+      new Set(
+        (pendingReviews.data ?? [])
+          .filter((r) => r.projectKey === projectKey && r.status === 'pending')
+          .map((r) => r.version),
+      ),
+    [pendingReviews.data, projectKey],
+  );
+
   // --- version payload / docs ----------------------------------------------
   const versionPayload = useApi(
     projectKey && version ? keys.version(projectKey, version) : null,
@@ -81,8 +94,12 @@ function ReviewWorkspace() {
         : 'root';
 
   useEffect(() => {
+    // Only normalise the URL once we know this version's real document list:
+    // before the payload arrives `docSlug` falls back to the root, and writing
+    // that back would throw away a `?doc=` deep link on every cold load.
+    if (!versionPayload.data) return;
     if (docSlug && params.doc !== docSlug) setParams({ doc: docSlug });
-  }, [docSlug, params.doc, setParams]);
+  }, [versionPayload.data, docSlug, params.doc, setParams]);
 
   const docPayload = useApi(
     isTree && projectKey && version && docSlug ? keys.doc(projectKey, version, docSlug) : null,
@@ -94,6 +111,10 @@ function ReviewWorkspace() {
     () => endpoints.getComments(projectKey!, version!),
   );
   const allComments: Comment[] = commentsState.data?.comments ?? [];
+  // What the feedback compiler will actually send: one entry per OPEN thread.
+  // The raw message count is still surfaced, but the promise must not overstate
+  // itself by counting agent replies or threads the human already resolved.
+  const actionable = actionableComments(allComments);
   const docComments = isTree ? allComments.filter((c) => c.doc === docSlug) : allComments;
 
   // --- outline section filter ----------------------------------------------
@@ -144,6 +165,31 @@ function ReviewWorkspace() {
     [projectKey, version, toast],
   );
 
+  const replyComment = useCallback(
+    async (rootId: string, body: string) => {
+      if (!projectKey || !version) return;
+      try {
+        await endpoints.replyToComment(projectKey, version, rootId, body);
+        invalidate(`comments:${projectKey}:${version}`);
+      } catch (err) {
+        toast(err instanceof Error ? err.message : 'Reply failed', 'error');
+        throw err;
+      }
+    },
+    [projectKey, version, toast],
+  );
+
+  const resolveComment = useCallback(
+    (id: string, resolved: boolean) => {
+      if (!projectKey || !version) return;
+      void endpoints
+        .resolveComment(projectKey, version, id, resolved)
+        .then(() => invalidate(`comments:${projectKey}:${version}`))
+        .catch((err) => toast(err instanceof Error ? err.message : 'Update failed', 'error'));
+    },
+    [projectKey, version, toast],
+  );
+
   const decide = useCallback(
     async (decision: 'approve' | 'reject', summary?: string) => {
       if (!contextualReviewId) return;
@@ -170,6 +216,27 @@ function ReviewWorkspace() {
   // --- dialogs ---------------------------------------------------------------
   const [gistOpen, setGistOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
+  // The rail is hidden below `lg`; this drives the drawer that replaces it.
+  const [railOpen, setRailOpen] = useState(false);
+
+  useEffect(() => {
+    if (!railOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setRailOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    // A drawer left open while the window grows past `lg` would sit on top of the
+    // real rail.
+    const wide = window.matchMedia('(min-width: 1024px)');
+    const onWide = (): void => {
+      if (wide.matches) setRailOpen(false);
+    };
+    wide.addEventListener('change', onWide);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      wide.removeEventListener('change', onWide);
+    };
+  }, [railOpen]);
   const onGistSaved = useCallback(
     (_binding: GistBinding) => {
       if (projectKey) invalidate(`storage:${projectKey}`);
@@ -220,7 +287,8 @@ function ReviewWorkspace() {
             manifest={manifest}
             activeDoc={docSlug}
             onDocChange={(slug) => setParams({ doc: slug })}
-            comments={allComments}
+            threads={actionable}
+            pendingVersions={pendingVersions}
             review={review}
             markdown={markdown}
             outlineSelection={section}
@@ -231,13 +299,25 @@ function ReviewWorkspace() {
             <ReviewBar
               review={review}
               viewingVersion={version ?? -1}
-              commentCount={allComments.length}
+              threadCount={actionable.length}
+              messageCount={allComments.length}
               onApprove={() => decide('approve')}
               onReject={(summary) => decide('reject', summary)}
             />
 
             {/* toolbar */}
             <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface-0 px-5 py-2 max-md:px-3">
+              {/* Below `lg` the rail is hidden, so this is the only way to change
+                  version, page or outline section. */}
+              <button
+                onClick={() => setRailOpen(true)}
+                aria-label="Versions and pages"
+                className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-[12px] font-medium text-ink-muted transition-colors hover:bg-surface-2 hover:text-ink lg:hidden"
+              >
+                <IconList className="h-3.5 w-3.5" />
+                Versions &amp; pages
+              </button>
+
               <ViewToggle diff={showDiff} onChange={(d) => setParams({ view: d ? 'diff' : null })} />
 
               {section && <OutlineBanner section={section} onClear={() => setSection(null)} />}
@@ -271,6 +351,8 @@ function ReviewWorkspace() {
                 comments={allComments}
                 onAddComment={addDiffComment}
                 onDeleteComment={deleteComment}
+                onReply={replyComment}
+                onResolve={resolveComment}
               />
             ) : (
               <PreviewPane
@@ -281,10 +363,56 @@ function ReviewWorkspace() {
                 generalNoteTick={generalNoteTick}
                 onAddComment={addComment}
                 onDeleteComment={deleteComment}
+                onReply={replyComment}
+                onResolve={resolveComment}
                 onNavigateDoc={(slug) => setParams({ doc: slug })}
               />
             )}
           </main>
+        </div>
+      )}
+
+      {projectKey && railOpen && (
+        <div className="fixed inset-0 z-40 lg:hidden">
+          <div
+            className="absolute inset-0 animate-fade-in bg-black/45 backdrop-blur-[2px]"
+            onClick={() => setRailOpen(false)}
+          />
+          <div
+            role="dialog"
+            aria-modal
+            aria-label="Versions and pages"
+            className="absolute inset-y-0 left-0 flex w-72 max-w-[85vw] flex-col border-r border-border bg-surface-0 shadow-pop"
+          >
+            <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-2.5">
+              <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-faint">
+                Versions &amp; pages
+              </h2>
+              <button
+                onClick={() => setRailOpen(false)}
+                aria-label="Close versions and pages"
+                className="rounded-lg p-1 text-ink-faint transition-colors hover:bg-surface-2 hover:text-ink"
+              >
+                <IconX className="h-4 w-4" />
+              </button>
+            </div>
+            <Sidebar
+              versions={versions}
+              activeVersion={version}
+              onVersionChange={(n) => setParams({ version: n })}
+              manifest={manifest}
+              activeDoc={docSlug}
+              onDocChange={(slug) => setParams({ doc: slug })}
+              threads={actionable}
+              pendingVersions={pendingVersions}
+              review={review}
+              markdown={markdown}
+              outlineSelection={section}
+              onOutlineSelect={(sel) => setSection(sel ? { start: sel.start, end: sel.end, label: sel.label } : null)}
+              className="min-h-0 flex-1 overflow-y-auto"
+              onNavigate={() => setRailOpen(false)}
+            />
+          </div>
         </div>
       )}
 

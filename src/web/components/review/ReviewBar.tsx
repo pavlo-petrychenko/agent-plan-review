@@ -7,7 +7,10 @@ export interface ReviewBarProps {
   review: Review | undefined;
   /** Version currently being viewed. */
   viewingVersion: number;
-  commentCount: number;
+  /** Open threads the compiler would send (one entry per thread). */
+  threadCount: number;
+  /** Every stored message, replies included — context, not the promise. */
+  messageCount: number;
   onApprove: () => Promise<void>;
   onReject: (summary?: string) => Promise<void>;
 }
@@ -17,7 +20,7 @@ export interface ReviewBarProps {
  * the human is viewing the exact version under review; the resolved pill
  * remains afterwards as the record.
  */
-export function ReviewBar({ review, viewingVersion, commentCount, onApprove, onReject }: ReviewBarProps) {
+export function ReviewBar({ review, viewingVersion, threadCount, messageCount, onApprove, onReject }: ReviewBarProps) {
   const [rejectOpen, setRejectOpen] = useState(false);
   const [busy, setBusy] = useState<'approve' | 'reject' | null>(null);
 
@@ -54,9 +57,10 @@ export function ReviewBar({ review, viewingVersion, commentCount, onApprove, onR
           </Pill>
         )}
 
-        {pending && commentCount > 0 && (
+        {pending && threadCount > 0 && (
           <span className="text-[12px] text-ink-muted">
-            {commentCount} comment{commentCount === 1 ? '' : 's'} will ride along with your decision
+            {threadCount} open thread{threadCount === 1 ? '' : 's'}
+            {messageCount > threadCount ? ` · ${messageCount} messages` : ''} will ride along with your decision
           </span>
         )}
 
