@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Button, cx, inputClass } from '../primitives.js';
 
 export interface ComposerState {
@@ -31,6 +31,9 @@ export function CommentComposer({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  /** Measured position; null until the panel has been laid out once. */
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     ref.current?.focus();
@@ -58,14 +61,31 @@ export function CommentComposer({
     }
   };
 
-  // Keep the panel inside the viewport.
-  const x = Math.min(state.x, window.innerWidth - 400);
-  const y = Math.min(state.y, window.innerHeight - 220);
+  // Keep the panel inside the viewport by MEASURING it: the previous clamp used a
+  // hardcoded 220px height and a 400px width, which clipped the panel off the left
+  // edge on narrow windows and fit only by luck vertically (a two-line quote grows
+  // the header). Re-clamped on resize too.
+  useLayoutEffect(() => {
+    const place = (): void => {
+      const el = panelRef.current;
+      if (!el) return;
+      const { width, height } = el.getBoundingClientRect();
+      const pad = 12;
+      setPos({
+        x: Math.min(Math.max(pad, state.x), Math.max(pad, window.innerWidth - width - pad)),
+        y: Math.min(Math.max(pad, state.y), Math.max(pad, window.innerHeight - height - pad)),
+      });
+    };
+    place();
+    window.addEventListener('resize', place);
+    return () => window.removeEventListener('resize', place);
+  }, [state.x, state.y, state.quote]);
 
   return (
     <div
+      ref={panelRef}
       className="fixed z-40 w-[380px] max-w-[calc(100vw-1.5rem)] animate-pop rounded-xl border border-border bg-surface-1 shadow-pop"
-      style={{ left: x, top: y }}
+      style={{ left: pos?.x ?? state.x, top: pos?.y ?? state.y, visibility: pos ? 'visible' : 'hidden' }}
       role="dialog"
       aria-label="Add comment"
     >

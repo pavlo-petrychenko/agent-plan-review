@@ -1,8 +1,10 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Comment } from '../../../shared/types.js';
+import type { Comment, CommentThreadView } from '../../../shared/types.js';
+import { groupThreads } from '../../../shared/threads.js';
 import { parseBlocks, type MdBlock } from './blocks.js';
 import { CommentThread } from '../comments/CommentThread.js';
 import { CommentComposer, type ComposerState } from '../comments/CommentComposer.js';
+import { ImageLightbox } from './ImageLightbox.js';
 import { EmptyState, cx } from '../primitives.js';
 import { IconChat } from '../icons.js';
 import { useTheme } from '../../state/theme.js';
@@ -24,13 +26,9 @@ export interface PreviewPaneProps {
   generalNoteTick?: number;
   onAddComment: (input: { body: string; quote: string | null; line: number | null; lineEnd: number | null }) => Promise<void>;
   onDeleteComment: (id: string) => void;
+  onReply: (rootId: string, body: string) => Promise<void>;
+  onResolve: (rootId: string, resolved: boolean) => void;
   onNavigateDoc: (slug: string) => void;
-}
-
-interface ThreadGroup {
-  key: string;
-  lineEnd: number;
-  comments: Comment[];
 }
 
 export function PreviewPane({
@@ -41,6 +39,8 @@ export function PreviewPane({
   generalNoteTick = 0,
   onAddComment,
   onDeleteComment,
+  onReply,
+  onResolve,
   onNavigateDoc,
 }: PreviewPaneProps) {
   const { theme } = useTheme();
@@ -48,6 +48,7 @@ export function PreviewPane({
   const blockRefs = useRef(new Map<number, HTMLDivElement>());
   const [composer, setComposer] = useState<ComposerState | null>(null);
   const [bubble, setBubble] = useState<{ x: number; y: number } | null>(null);
+  const [zoom, setZoom] = useState<{ src: string; alt: string; line: number | null } | null>(null);
   const [pendingSelection, setPendingSelection] = useState<
     { quote: string; line: number; lineEnd: number } | null
   >(null);
@@ -57,34 +58,28 @@ export function PreviewPane({
   const lineComments = useMemo(() => comments.filter((c) => c.line != null), [comments]);
   const generalComments = useMemo(() => comments.filter((c) => c.line == null), [comments]);
 
-  // Group line comments by their end line — threads hang off the end block.
+  // Threads group a root comment with its replies. Line threads hang off the
+  // block their root ends on; general threads render at the bottom.
   const threadsByEnd = useMemo(() => {
-    const map = new Map<number, ThreadGroup[]>();
-    for (const c of lineComments) {
-      const end = c.lineEnd ?? c.line!;
-      let groups = map.get(end);
-      if (!groups) {
-        groups = [];
-        map.set(end, groups);
-      }
-      let group = groups.find((g) => g.key === `${c.doc}:${c.line}-${end}`);
-      if (!group) {
-        group = { key: `${c.doc}:${c.line}-${end}`, lineEnd: end, comments: [] };
-        groups.push(group);
-      }
-      group.comments.push(c);
-    }
-    for (const groups of map.values()) {
-      for (const g of groups) {
-        g.comments.sort((a, b) => (a.line! - b.line!) || (a.createdAt.localeCompare(b.createdAt)));
-      }
+    const map = new Map<number, CommentThreadView[]>();
+    for (const thread of groupThreads(lineComments)) {
+      const end = thread.root.lineEnd ?? thread.root.line!;
+      const bucket = map.get(end);
+      if (bucket) bucket.push(thread);
+      else map.set(end, [thread]);
     }
     return map;
   }, [lineComments]);
 
+  const generalThreads = useMemo(() => groupThreads(generalComments), [generalComments]);
+
   const commentedLines = useMemo(() => {
-    return new Set(lineComments.flatMap((c) => range(c.line!, c.lineEnd ?? c.line!)));
-  }, [lineComments]);
+    // Resolved threads keep their card (below) but lose the tint: the highlight
+    // answers "what is still open?", and a closed question is not.
+    const closed = new Set(comments.filter((c) => c.resolved).map((c) => c.id));
+    const active = lineComments.filter((c) => !closed.has(c.parentId ?? c.id));
+    return new Set(active.flatMap((c) => range(c.line!, c.lineEnd ?? c.line!)));
+  }, [lineComments, comments]);
 
   const isVisible = useCallback(
     (block: MdBlock) => !section || (block.lineEnd >= section.start && block.lineStart < section.end),
@@ -165,9 +160,13 @@ export function PreviewPane({
         line,
         lineEnd,
       });
+      // Keep the affordance inside the reading pane: anchored to a selection near
+      // the top it used to sit over the toolbar, and a wide selection could push
+      // it off either edge.
+      const paneTop = containerRef.current?.getBoundingClientRect().top ?? 0;
       setBubble({
-        x: rect.left + rect.width / 2 - 44,
-        y: Math.max(8, rect.top - 46),
+        x: Math.min(Math.max(8, rect.left + rect.width / 2 - 44), Math.max(8, window.innerWidth - 118)),
+        y: Math.max(paneTop + 8, rect.top - 46),
       });
     }, 10);
   }, []);
@@ -192,6 +191,18 @@ export function PreviewPane({
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
       const target = e.target as HTMLElement;
+      // Images open in a viewer: a plan screenshot is unreadable at column width.
+      if (target.tagName === 'IMG') {
+        const img = target as HTMLImageElement;
+        const block = img.closest('.md-block');
+        setZoom({
+          src: img.currentSrc || img.src,
+          alt: img.alt,
+          // Cap to the block's source range: a stable, useful caption.
+          line: block ? Number(block.getAttribute('data-line-start')) || null : null,
+        });
+        return;
+      }
       const link = target.closest('a[data-doc-slug]') as HTMLAnchorElement | null;
       if (link) {
         e.preventDefault();
@@ -200,6 +211,28 @@ export function PreviewPane({
     },
     [onNavigateDoc],
   );
+
+  // Mark failed images so a broken link reads as a deliberate placeholder
+  // instead of stray alt text. Keyed on `html` (React re-creates these nodes on
+  // every content change). Repeated sweeps rather than event listeners alone:
+  // a fast DNS failure can fire before we can listen, and a re-render can
+  // replace the node the listener was attached to.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const sweep = (): void => {
+      for (const img of el.querySelectorAll('img')) {
+        if (img.complete && img.naturalWidth === 0) img.classList.add('md-img-broken');
+      }
+    };
+    sweep();
+    const interval = setInterval(sweep, 250);
+    const stop = setTimeout(() => clearInterval(interval), 6000);
+    return () => {
+      clearInterval(interval);
+      clearTimeout(stop);
+    };
+  }, [html]);
 
   const scrollToBlock = useCallback((lineEnd: number) => {
     for (const [, el] of blockRefs.current) {
@@ -254,7 +287,7 @@ export function PreviewPane({
         ) : (
           visibleBlocks.map((block) => {
             const commented = intersects(commentedLines, block);
-            const groups = threadsByEnd.get(block.lineEnd) ?? [];
+            const threads = threadsByEnd.get(block.lineEnd) ?? [];
             return (
               <Fragment key={block.index}>
                 <div
@@ -267,12 +300,14 @@ export function PreviewPane({
                   className={cx('md-block-wrap', commented && 'md-commented')}
                   dangerouslySetInnerHTML={{ __html: block.html }}
                 />
-                {groups.map((group) => (
+                {threads.map((thread) => (
                   <CommentThread
-                    key={group.key}
-                    comments={group.comments}
+                    key={thread.root.id}
+                    thread={thread}
                     onDelete={onDeleteComment}
-                    onLocate={() => scrollToBlock(group.lineEnd)}
+                    onReply={onReply}
+                    onResolve={onResolve}
+                    onLocate={() => scrollToBlock(thread.root.lineEnd ?? block.lineEnd)}
                   />
                 ))}
               </Fragment>
@@ -286,20 +321,33 @@ export function PreviewPane({
           [...threadsByEnd.entries()]
             .filter(([end]) => !visibleBlocks.some((b) => b.lineEnd === end))
             .sort((a, b) => a[0] - b[0])
-            .map(([, groups]) =>
-              groups.map((group) => (
+            .map(([, threads]) =>
+              threads.map((thread) => (
                 <CommentThread
-                  key={`orphan-${group.key}`}
-                  comments={group.comments}
+                  key={`orphan-${thread.root.id}`}
+                  thread={thread}
                   onDelete={onDeleteComment}
+                  onReply={onReply}
+                  onResolve={onResolve}
                 />
               )),
             )}
 
-        {generalComments.length > 0 && (
+        {generalThreads.length > 0 && (
           <div className="mt-14 border-t border-border pt-6">
             <h3 className="mb-3 font-serif text-[17px] font-semibold">General notes</h3>
-            <CommentThread comments={generalComments} onDelete={onDeleteComment} compact />
+            <div className="flex flex-col">
+              {generalThreads.map((thread) => (
+                <CommentThread
+                  key={thread.root.id}
+                  thread={thread}
+                  onDelete={onDeleteComment}
+                  onReply={onReply}
+                  onResolve={onResolve}
+                  compact
+                />
+              ))}
+            </div>
           </div>
         )}
       </div>
@@ -317,6 +365,7 @@ export function PreviewPane({
       )}
 
       {/* Composer */}
+      {zoom && <ImageLightbox src={zoom.src} alt={zoom.alt} line={zoom.line} onClose={() => setZoom(null)} />}
       {composer && (
         <CommentComposer
           state={composer}
