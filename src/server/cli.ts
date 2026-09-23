@@ -32,7 +32,7 @@ Usage:
 
 Commands:
   serve                    Start the review server (http://localhost:${cfg.port})
-  mcp                      Run the MCP stdio server (plan_review_submit / plan_review_check)
+  mcp                      Run the MCP stdio server (plan_review_submit / plan_review_check / plan_review_reply)
   install-skill            Install the "agent-plan-review" skill globally (~/.pi/agent/skills)
   install-pi-extension     Install the plan-review-wake extension (~/.pi/agent/extensions):
                            wakes idle sessions with the decision so agents can stop
@@ -52,7 +52,8 @@ Integration — pi & any MCP client (tools, one-shot long-poll):
     "agent-plan-review": { "command": "${APP_NAME}", "args": ["mcp"], "requestTimeoutMs": 180000000 }
   Agents submit with plan_review_submit, then make ONE long plan_review_check call
   (wait_seconds up to AGENT_PLAN_REVIEW_MAX_WAIT). Clients that auto-background long
-  calls (Claude Code) deliver the result on their own.
+  calls (Claude Code) deliver the result on their own. plan_review_check also returns
+  early when the human writes to a comment thread; answer with plan_review_reply.
 
 Environment:
   AGENT_PLAN_REVIEW_HOME        Storage root (default ~/.agent-plan-review)
@@ -82,7 +83,8 @@ switch (command) {
     fs.writeFileSync(file, PI_WAKE_EXTENSION_SOURCE);
     process.stdout.write(`pi wake extension installed: ${file}\n`);
     process.stdout.write('Restart pi sessions or run /reload to activate it.\n');
-    process.stdout.write('It watches ~/.agent-plan-review/reviews and injects decisions into idle sessions.\n');
+    process.stdout.write('It watches ~/.agent-plan-review/reviews and injects decisions into idle sessions,\n');
+    process.stdout.write('and wakes the session when the human writes to a comment thread.\n');
     break;
   }
   case 'hook-exit-plan-mode':

@@ -16,6 +16,9 @@ export const PI_WAKE_EXTENSION_SOURCE = `/**
  * turn, so the agent may end its turn right after plan_review_submit instead
  * of blocking on a long plan_review_check call.
  *
+ * Also polls the pending review's comments file and injects a turn when the
+ * human writes to a thread, so the agent can answer with plan_review_reply.
+ *
  * Also maintains a heartbeat (~/.agent-plan-review/wake-active.json) so the
  * Claude Code stop-gate stands down on machines where a waker exists.
  */
@@ -83,8 +86,13 @@ export default function (pi) {
   let watcher;
   let heartbeat;
   let scanTimer;
+  let commentPoll;
   // reviewId -> status at last sight; lets us fire only on pending->resolved.
   const seen = new Map();
+  // reviewId -> newest human comment createdAt already delivered to this session.
+  const humanSeen = new Map();
+  // reviewId -> { id, review } for the most recent scan, for the comment poll.
+  const reviewById = new Map();
   const woke = new Set();
   let markerFile = '';
   let reviewsDir = '';
@@ -94,6 +102,8 @@ export default function (pi) {
     watcher = undefined;
     if (heartbeat) clearInterval(heartbeat);
     heartbeat = undefined;
+    if (commentPoll) clearInterval(commentPoll);
+    commentPoll = undefined;
     if (scanTimer) clearTimeout(scanTimer);
     scanTimer = undefined;
     // Drop our own heartbeat entry so the Claude Code stop-gate resumes
@@ -155,6 +165,7 @@ function scan(initial) {
     for (const entry of scanReviews(reviewsDir)) {
       const prev = seen.get(entry.id);
       seen.set(entry.id, entry.review.status || 'pending');
+      reviewById.set(entry.id, entry);
       if (initial || prev === undefined) continue; // never wake for history
       if (prev !== 'pending') continue; // only pending -> resolved wakes
       const status = entry.review.status;
@@ -162,6 +173,52 @@ function scan(initial) {
       if (entry.review.origin === 'hook') continue; // hook flow blocks natively
       if (entry.review.cwd && !sameProject(entry.review.cwd, process.cwd())) continue;
       decide(entry.review);
+    }
+  }
+
+  /**
+   * The human may write to a comment thread while a review is still pending.
+   * Comments live under projects/<key>/comments/, not reviews/, so poll them.
+   */
+  function commentsFile(review) {
+    const pad = String(review.version).padStart(4, '0');
+    return path.join(homeDir(), 'projects', review.projectKey, 'comments', pad + '.json');
+  }
+
+  function readComments(review) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(commentsFile(review), 'utf8'));
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function pollComments() {
+    for (const entry of reviewById.values()) {
+      const review = entry.review;
+      if (!review || review.status !== 'pending') continue;
+      if (review.cwd && !sameProject(review.cwd, process.cwd())) continue;
+      const humans = readComments(review).filter((c) => c && c.author === 'me');
+      let newest = '';
+      for (const c of humans) if (typeof c.createdAt === 'string' && c.createdAt > newest) newest = c.createdAt;
+      const prev = humanSeen.get(review.id);
+      if (prev === undefined) {
+        humanSeen.set(review.id, newest); // seed without waking
+        continue;
+      }
+      if (!newest || newest <= prev) continue;
+      humanSeen.set(review.id, newest);
+      const fresh = humans.filter((c) => typeof c.createdAt === 'string' && c.createdAt > prev);
+      const lines = fresh
+        .map((c) => '- [threadId ' + (c.parentId || c.id) + '] ' + (c.quote ? '"' + c.quote + '" — ' : '') + c.body)
+        .join('\\n');
+      const content =
+        'The human wrote to you on plan review (v' + review.version + '):\\n' + lines +
+        '\\n\\nAnswer each with plan_review_reply { "reviewId": "' + review.id +
+        '", "commentId": "<threadId>", "body": "..." }, then call plan_review_check again. ' +
+        'This is a discussion thread — not every thread needs a plan change.';
+      void pi.sendMessage({ customType: 'plan-review-wake', content, display: true }, { triggerTurn: true });
     }
   }
 
@@ -184,6 +241,7 @@ function scan(initial) {
     }
 
     scan(true); // seed without waking
+    pollComments(); // seed comment cursors without waking
 
     try {
       watcher = fs.watch(reviewsDir, () => scheduleScan());
@@ -195,6 +253,8 @@ function scan(initial) {
     writeHeartbeat(markerFile, cwd);
     heartbeat = setInterval(() => writeHeartbeat(markerFile, cwd), HEARTBEAT_MS);
     heartbeat.unref?.();
+    commentPoll = setInterval(pollComments, 2000);
+    commentPoll.unref?.();
 
     if (ctx?.hasUI) {
       ctx.ui.notify('plan-review-wake: watching ' + reviewsDir, 'info');

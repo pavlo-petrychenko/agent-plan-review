@@ -102,3 +102,36 @@ test('old-side (diff-anchored) comments are labelled as removed and quote the ba
   // Removed-line comments come after current-line comments.
   assert.ok(out.indexOf('new-side note') < out.indexOf('why drop the rollout'));
 });
+
+test('agent replies are conversation, never compiled feedback', () => {
+  const root = c({ id: 'r1', line: 7, body: 'why this approach?' });
+  const reply = c({ id: 'a1', parentId: 'r1', author: 'agent', body: 'because of latency' });
+  const out = compileRejection([root, reply], undefined, noResolve, 2);
+  assert.match(out, /why this approach\?/);
+  assert.ok(!out.includes('because of latency'));
+});
+
+test('the newest human message in a thread supersedes the original ask', () => {
+  const root = c({ id: 'r1', line: 7, body: 'why this approach?' });
+  const agent = c({ id: 'a1', parentId: 'r1', author: 'agent', body: 'latency' });
+  const followUp = c({ id: 'm2', parentId: 'r1', body: 'actually use a queue' });
+  const out = compileRejection([root, agent, followUp], undefined, noResolve, 2);
+  assert.match(out, /actually use a queue/);
+  assert.ok(!out.includes('why this approach?'));
+});
+
+test('resolved threads drop out of feedback entirely', () => {
+  const open = c({ id: 'r1', line: 3, body: 'unresolved ask' });
+  const closed = c({ id: 'r2', line: 9, body: 'answered question', resolved: true });
+  const out = compileRejection([open, closed], undefined, noResolve, 2);
+  assert.match(out, /unresolved ask/);
+  assert.ok(!out.includes('answered question'));
+});
+
+test('approval counts open threads, not raw comments', () => {
+  const root = c({ id: 'r1', line: 3, body: 'note' });
+  const reply = c({ id: 'a1', parentId: 'r1', author: 'agent', body: 'ack' });
+  const resolved = c({ id: 'r2', body: 'done', resolved: true });
+  const out = compileApproval([root, reply, resolved], undefined, noResolve);
+  assert.match(out, /APPROVED the plan with 1 comment/);
+});

@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PlanReviewStore } from './store.js';
+import { PlanValidationError } from '../util/errors.js';
 
 function makeStore(): PlanReviewStore {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'apr-store-'));
@@ -231,4 +232,148 @@ test('moving a project into itself is rejected', async () => {
   const cwd = makeDir('apr-self-');
   const plan = await store.recordPlan({ cwd, origin: 'api', markdown: '# A\n\none' });
   await assert.rejects(() => store.moveVersions(plan.projectKey, plan.projectKey), /same/);
+});
+
+test('review messages hand the agent human comments once, tracking a cursor', async () => {
+  const store = makeStore();
+  const cwd = makeDir('apr-msg-');
+  const rec = await store.recordPlan({ cwd, origin: 'mcp', markdown: '# Plan\n\nbody' });
+  const first = await store.addComment(rec.projectKey, rec.version, { body: 'first', doc: 'root', line: 1 });
+
+  const initial = await store.getReviewMessages(rec.reviewId);
+  assert.deepEqual(initial.comments.map((c) => c.body), ['first']);
+  await store.markAgentCursor(rec.reviewId, initial.cursor);
+
+  // The agent's own reply is conversation, not something to hand back.
+  await store.addAgentReply(rec.projectKey, rec.version, first.id, 'answer');
+  assert.equal((await store.getReviewMessages(rec.reviewId)).comments.length, 0);
+
+  await store.addComment(rec.projectKey, rec.version, { body: 'second', doc: 'root', line: 2 });
+  assert.deepEqual((await store.getReviewMessages(rec.reviewId)).comments.map((c) => c.body), ['second']);
+});
+
+test('open threads carry forward to the new version, re-anchored; resolved ones stay behind', async () => {
+  const store = makeStore();
+  const cwd = makeDir('apr-carry-');
+  const v1 = await store.recordPlan({
+    cwd,
+    origin: 'mcp',
+    markdown: '# Plan\n\nalpha\n\nbeta\n\ngamma',
+  });
+  const root = await store.addComment(v1.projectKey, 1, { body: 'why alpha?', doc: 'root', line: 3, quote: 'alpha' });
+  const settled = await store.addComment(v1.projectKey, 1, { body: 'settled', doc: 'root', line: 5 });
+  await store.resolveComment(v1.projectKey, 1, settled.id, true);
+  await store.addAgentReply(v1.projectKey, 1, root.id, 'because reasons');
+
+  // A line inserted above shifts alpha from line 3 to line 5.
+  const v2 = await store.recordPlan({
+    cwd,
+    origin: 'mcp',
+    markdown: '# Plan\n\nintro\n\nalpha\n\nbeta\n\ngamma',
+  });
+  assert.equal(v2.version, 2);
+
+  const carried = await store.listComments(v2.projectKey, 2);
+  const roots = carried.filter((c) => c.parentId == null);
+  assert.equal(roots.length, 1, 'only the open thread carries');
+  assert.equal(roots[0].body, 'why alpha?');
+  assert.equal(roots[0].line, 5, 're-anchored by the diff');
+  const replies = carried.filter((c) => c.parentId != null);
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].author, 'agent');
+  assert.equal(replies[0].line, 5);
+});
+
+test('removed-line threads carry forward, re-anchor onto the new side, and stay answerable', async () => {
+  const store = makeStore();
+  const cwd = makeDir('apr-carry-old-');
+  const v1 = await store.recordPlan({
+    cwd,
+    origin: 'mcp',
+    markdown: '# Plan\n\nalpha\n\nbeta\n\ngamma',
+  });
+  // A question about a line the next version rewrites (an old-side anchor).
+  const ask = await store.addComment(v1.projectKey, 1, {
+    body: 'why change this line?',
+    doc: 'root',
+    line: 5,
+    side: 'old',
+    baseVersion: 1,
+    quote: 'beta',
+  });
+
+  const v2 = await store.recordPlan({
+    cwd,
+    origin: 'mcp',
+    markdown: '# Plan\n\nalpha\n\nbeta, but different\n\ngamma',
+  });
+
+  const carried = await store.listComments(v2.projectKey, 2);
+  const roots = carried.filter((c) => c.parentId == null);
+  assert.equal(roots.length, 1, 'the removed-line thread travels to the new version');
+  assert.equal(roots[0].id, ask.id, 'and keeps its id, so replies resolve');
+  assert.equal(roots[0].line, 5, 're-anchored onto the rewritten line itself');
+  assert.equal(roots[0].side, undefined, 'no longer framed as a removed-line anchor');
+  assert.equal(roots[0].baseVersion, undefined);
+  assert.equal(roots[0].quote, 'beta', 'the quoted text still says what was being discussed');
+
+  // The agent can answer it: the reply lands on the version the human is reading.
+  const { comment, version } = await store.replyToThread(v2.projectKey, 2, ask.id, 'because reasons');
+  assert.equal(version, 2);
+  assert.equal(comment.parentId, ask.id);
+  assert.equal(comment.line, 5);
+  assert.equal((await store.listComments(v2.projectKey, 2)).length, 2);
+});
+
+test('replyToThread finds threads that stayed on an older version', async () => {
+  const store = makeStore();
+  const cwd = makeDir('apr-reply-old-');
+  const v1 = await store.recordPlan({ cwd, origin: 'mcp', markdown: '# Plan\n\nalpha\n\nbeta' });
+  const root = await store.addComment(v1.projectKey, 1, { body: 'about alpha', doc: 'root', line: 3 });
+  await store.resolveComment(v1.projectKey, 1, root.id, true); // resolved => not carried
+  const v2 = await store.recordPlan({ cwd, origin: 'mcp', markdown: '# Plan\n\nalpha\n\nbeta\n\ngamma' });
+  assert.equal((await store.listComments(v2.projectKey, 2)).length, 0, 'resolved threads stay behind');
+
+  // Answering it must not blow up with "Thread not found".
+  const { version } = await store.replyToThread(v2.projectKey, 2, root.id, 'closing the loop');
+  assert.equal(version, 1, 'routed to the version that actually owns the thread');
+  assert.equal((await store.listComments(v1.projectKey, 1)).length, 2);
+});
+
+test('plan images are stored, image:NAME is rewritten, and a dangling ref fails the plan', async () => {
+  const store = makeStore();
+  const cwd = makeDir('apr-img-plan-');
+  const png = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from('body'),
+  ]);
+  const result = await store.recordPlan({
+    cwd,
+    origin: 'mcp',
+    markdown: '# Fixes\n\nbefore:\n\n![before the fix](image:before)\n\nafter:\n\n![after the fix](image:after)',
+    images: [
+      { name: 'before', dataBase64: png.toString('base64') },
+      { name: 'after', dataBase64: png.toString('base64') },
+    ],
+  });
+  const payload = await store.getVersionPayload(result.projectKey, result.version);
+  assert.equal(payload.markdown!.includes('image:before'), false, 'refs are rewritten before storage');
+  assert.match(payload.markdown!, /!\[before the fix\]\(\/api\/images\/[a-f0-9]{16}\.png\)/);
+  // Same bytes => one file, so the two refs share a URL.
+  const urls = [...payload.markdown!.matchAll(/\/api\/images\/[a-f0-9]{16}\.png/g)].map((m) => m[0]);
+  assert.equal(new Set(urls).size, 1, 'content-addressed: one file for identical bytes');
+
+  await assert.rejects(
+    () =>
+      store.recordPlan({
+        cwd: makeDir('apr-img-plan2-'),
+        origin: 'mcp',
+        markdown: '# Broken\n\n![nope](image:not-attached)',
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof PlanValidationError, 'rejected as a plan validation failure');
+      assert.match(err.issues[0].message, /not attached/i);
+      return true;
+    },
+  );
 });

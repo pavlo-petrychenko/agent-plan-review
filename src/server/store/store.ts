@@ -13,6 +13,7 @@ import type {
   ProjectMeta,
   ProjectSummary,
   Review,
+  ReviewMessagesPayload,
   ReviewStatus,
   VersionPayload,
 } from '../../shared/types.js';
@@ -24,6 +25,8 @@ import { ReviewStore, FORCE_REJECT_REASON } from './reviews.js';
 import { VersionStore } from './versions.js';
 import { recordPlan, type RecordInput, type RecordOutput } from './record.js';
 import { compileApproval, compileRejection } from '../../shared/compile.js';
+import { actionableComments } from '../../shared/compile.js';
+import { latestCreatedAt } from '../../shared/threads.js';
 import { renderMarkdown } from '../render/markdown.js';
 import { conflict, notFound, badRequest } from '../util/errors.js';
 
@@ -107,9 +110,88 @@ export class PlanReviewStore {
     return this.comments.list(key, n, doc);
   }
 
+  /**
+   * Human messages on a review the agent has not seen yet, for the conversation
+   * loop. `since` defaults to the cursor already persisted on the review, so a
+   * forgetful agent cannot be handed the same question twice.
+   */
+  async getReviewMessages(id: string, since?: string | null): Promise<ReviewMessagesPayload> {
+    const review = await this.reviews.get(id);
+    if (!review) throw notFound('Review');
+    const human = (await this.comments.list(review.projectKey, review.version)).filter(
+      (c) => c.author === 'me',
+    );
+    const cursor = since ?? review.agentCursor ?? null;
+    const comments = cursor ? human.filter((c) => c.createdAt > cursor) : human;
+    return { cursor: latestCreatedAt(human) ?? cursor, comments };
+  }
+
+  /** Persist the conversation cursor after delivering messages to the agent. */
+  async markAgentCursor(id: string, cursor: string | null): Promise<void> {
+    if (!cursor) return;
+    await this.reviews.update(id, { agentCursor: cursor });
+  }
+
   async addComment(key: string, n: number, input: CreateCommentInput): Promise<Comment> {
     const manifest = await this.versions.readManifest(key, n);
-    return this.comments.create(key, n, input, this.comments.defaultDoc(manifest ?? undefined));
+    try {
+      return await this.comments.create(key, n, input, this.comments.defaultDoc(manifest ?? undefined), 'me');
+    } catch (err) {
+      throw mapParentError(err);
+    }
+  }
+
+  /** Agent reply into an existing thread (author is set server-side). */
+  async addAgentReply(key: string, n: number, rootId: string, body: string): Promise<Comment> {
+    const manifest = await this.versions.readManifest(key, n);
+    try {
+      return await this.comments.create(
+        key,
+        n,
+        { parentId: rootId, body },
+        this.comments.defaultDoc(manifest ?? undefined),
+        'agent',
+      );
+    } catch (err) {
+      throw mapParentError(err);
+    }
+  }
+
+  /**
+   * Which version of a project owns this comment id, newest first. Threads are
+   * stored per version, so an agent answering a question must be routed to the
+   * version the thread actually lives on — including the case where the human
+   * is looking at a newer version than the one the thread was written on.
+   */
+  async findCommentVersion(key: string, commentId: string): Promise<number | null> {
+    const detail = await this.getProjectDetail(key);
+    const newestFirst = [...detail.versions].sort((a, b) => b.n - a.n);
+    for (const v of newestFirst) {
+      const comments = await this.comments.list(key, v.n);
+      if (comments.some((c) => c.id === commentId)) return v.n;
+    }
+    return null;
+  }
+
+  /**
+   * Reply to a thread wherever it lives (see `findCommentVersion`). Carried
+   * threads keep their id, so this lands on the newest version that has it and
+   * the human — who is looking at that version — sees the answer.
+   */
+  async replyToThread(
+    key: string,
+    preferredVersion: number,
+    rootId: string,
+    body: string,
+  ): Promise<{ comment: Comment; version: number }> {
+    const version = (await this.findCommentVersion(key, rootId)) ?? preferredVersion;
+    return { comment: await this.addAgentReply(key, version, rootId, body), version };
+  }
+
+  async resolveComment(key: string, n: number, commentId: string, resolved: boolean): Promise<Comment> {
+    const updated = await this.comments.setResolved(key, n, commentId, resolved);
+    if (!updated) throw notFound('Thread');
+    return updated;
   }
 
   async deleteComment(key: string, n: number, commentId: string): Promise<void> {
@@ -225,7 +307,7 @@ export class PlanReviewStore {
 
     const updated = await this.reviews.decide(id, decision, payload);
     if (!updated) throw conflict({ error: 'Review already resolved' });
-    return { review: updated, commentCount: comments.length };
+    return { review: updated, commentCount: actionableComments(comments).length };
   }
 
   private async lineSliceResolver(
@@ -412,4 +494,10 @@ export class PlanReviewStore {
   async pruneResolved(): Promise<void> {
     await this.reviews.pruneResolved();
   }
+}
+
+/** A reply whose thread root is gone is a 404, not a 500. */
+function mapParentError(err: unknown): unknown {
+  if (err instanceof Error && err.message === 'Parent comment not found') return notFound('Thread');
+  return err;
 }

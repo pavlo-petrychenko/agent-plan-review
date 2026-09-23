@@ -1,9 +1,12 @@
 import { Router } from 'express';
+import path from 'node:path';
 import type { PlanReviewStore } from '../store/store.js';
 import { APP_VERSION } from '../config.js';
 import { gistReadiness, saveGist, GistError } from '../channels/gist.js';
 import { badRequest, conflict, notFound } from '../util/errors.js';
 import { forceFlag, parseVersionParam, wrap } from './helpers.js';
+import { IMAGE_FILE_RE, contentTypeFor, storePlanImage } from '../store/images.js';
+import { renderCommentBody } from '../render/comments.js';
 
 /** Assemble the full /api router. */
 export function createApiRouter(store: PlanReviewStore): Router {
@@ -24,6 +27,28 @@ export function createApiRouter(store: PlanReviewStore): Router {
 
   api.get('/channels', wrap(async (_req, res) => {
     res.json([await gistReadiness()]);
+  }));
+
+  // -------------------------------------------------------------------------
+  // plan images (content-addressed; referenced from markdown as /api/images/<f>)
+  // -------------------------------------------------------------------------
+  api.post('/images', wrap(async (req, res) => {
+    const body = req.body ?? {};
+    const source = typeof body.dataBase64 === 'string' && body.dataBase64
+      ? { name: typeof body.name === 'string' ? body.name : 'image', dataBase64: body.dataBase64 }
+      : null;
+    if (!source) throw badRequest('body.dataBase64 is required (optionally with body.name).');
+    const stored = await storePlanImage(store.layout, source);
+    res.status(201).json(stored);
+  }));
+
+  api.get('/images/:file', wrap(async (req, res) => {
+    const file = req.params.file;
+    if (!IMAGE_FILE_RE.test(file)) throw notFound('Image');
+    res.type(contentTypeFor(file));
+    // Content-addressed: the bytes behind a name never change.
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.sendFile(path.join(store.layout.imagesDir, file));
   }));
 
   // -------------------------------------------------------------------------
@@ -134,7 +159,10 @@ export function createApiRouter(store: PlanReviewStore): Router {
   // -------------------------------------------------------------------------
   api.get('/projects/:key/versions/:n/comments', wrap(async (req, res) => {
     const doc = typeof req.query.doc === 'string' ? req.query.doc : undefined;
-    res.json({ comments: await store.listComments(req.params.key, parseVersionParam(req.params.n), doc) });
+    const comments = await store.listComments(req.params.key, parseVersionParam(req.params.n), doc);
+    // Bodies are markdown (humans and agents both write it). `html` is derived for
+    // display only and never persisted; raw HTML inside a body is dropped.
+    res.json({ comments: comments.map((c) => ({ ...c, html: renderCommentBody(c.body) })) });
   }));
 
   api.post('/projects/:key/versions/:n/comments', wrap(async (req, res) => {
@@ -146,6 +174,22 @@ export function createApiRouter(store: PlanReviewStore): Router {
   api.delete('/projects/:key/versions/:n/comments/:id', wrap(async (req, res) => {
     await store.deleteComment(req.params.key, parseVersionParam(req.params.n), req.params.id);
     res.json({ ok: true });
+  }));
+
+  // Human reply into a thread — anchor inherited from the root.
+  api.post('/projects/:key/versions/:n/comments/:id/replies', wrap(async (req, res) => {
+    const body = validateCommentBody(req.body);
+    const comment = await store.addComment(req.params.key, parseVersionParam(req.params.n), {
+      ...body,
+      parentId: req.params.id,
+    });
+    res.status(201).json(comment);
+  }));
+
+  // Resolve/unresolve a thread root.
+  api.post('/projects/:key/versions/:n/comments/:id/resolve', wrap(async (req, res) => {
+    const resolved = req.body?.resolved !== false;
+    res.json(await store.resolveComment(req.params.key, parseVersionParam(req.params.n), req.params.id, resolved));
   }));
 
   // -------------------------------------------------------------------------
@@ -163,10 +207,11 @@ export function createApiRouter(store: PlanReviewStore): Router {
   // plans (tools-first creation fallback)
   // -------------------------------------------------------------------------
   api.post('/plans', wrap(async (req, res) => {
-    const { cwd, markdown, plan, docs, name } = req.body ?? {};
+    const { cwd, markdown, plan, docs, name, images } = req.body ?? {};
     if (typeof cwd !== 'string' || !cwd.trim()) throw badRequest('cwd is required');
     const source = docs ? { docs } : typeof markdown === 'string' ? { markdown } : typeof plan === 'string' ? { markdown: plan } : null;
     if (!source) throw badRequest('Provide one of: docs[], markdown, plan');
+    if (images != null && !Array.isArray(images)) throw badRequest('images must be an array of { name, path | dataBase64 }');
 
     const result = await store.recordPlan({
       cwd,
@@ -174,6 +219,7 @@ export function createApiRouter(store: PlanReviewStore): Router {
       origin: 'api',
       markdown: source.markdown,
       docs: source.docs,
+      images,
     });
     if (!result.isLoser) {
       const { openBrowser } = await import('../integrations/browser.js');
@@ -208,6 +254,27 @@ export function createApiRouter(store: PlanReviewStore): Router {
     if (decision !== 'approve' && decision !== 'reject') throw badRequest('decision must be "approve" or "reject"');
     const summary = typeof req.body?.summary === 'string' ? req.body.summary : undefined;
     res.json(await store.decideReview(req.params.id, decision, summary));
+  }));
+
+  // -------------------------------------------------------------------------
+  // agent conversation (thread replies) — author is set server-side
+  // -------------------------------------------------------------------------
+  api.get('/reviews/:id/messages', wrap(async (req, res) => {
+    const since = typeof req.query.since === 'string' && req.query.since ? req.query.since : undefined;
+    res.json(await store.getReviewMessages(req.params.id, since));
+  }));
+
+  api.post('/reviews/:id/replies', wrap(async (req, res) => {
+    const review = await store.getReview(req.params.id);
+    if (!review) throw notFound('Review');
+    const commentId = typeof req.body?.commentId === 'string' ? req.body.commentId : '';
+    const body = typeof req.body?.body === 'string' ? req.body.body.trim() : '';
+    if (!commentId) throw badRequest('commentId is required');
+    if (!body) throw badRequest('body is required');
+    // Reply where the thread lives: it may have been carried onto this version
+    // (same id) or still sit on the version it was written on.
+    const { comment } = await store.replyToThread(review.projectKey, review.version, commentId, body);
+    res.status(201).json(comment);
   }));
 
   return api;

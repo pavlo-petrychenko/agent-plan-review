@@ -11,6 +11,7 @@
 
 import type { Comment, PlanIssue } from './types.js';
 import type { Manifest } from './types.js';
+import { actionableMessage, groupThreads, isOpenThread } from './threads.js';
 
 export interface LineSliceResolver {
   /**
@@ -80,6 +81,17 @@ function bySideThenLine(a: Comment, b: Comment): number {
 export type ResubmitChannel = 'ExitPlanMode' | 'plan_review_submit';
 
 /**
+ * Comments that should reach the agent: one entry per OPEN thread, carrying the
+ * newest human message (a follow-up supersedes the original ask). Agent replies
+ * are conversation, never feedback, and resolved threads drop out entirely.
+ */
+export function actionableComments(comments: Comment[]): Comment[] {
+  return groupThreads(comments)
+    .filter(isOpenThread)
+    .map(actionableMessage);
+}
+
+/**
  * Compile the denial reason sent back to the agent on "Request changes".
  * `resubmitVia` names the channel the agent should use to re-present.
  */
@@ -92,7 +104,8 @@ export function compileRejection(
 ): string {
   const where = version ? `version ${version} ` : '';
   const again = `re-present the revised plan via ${resubmitVia}.`;
-  if (comments.length === 0) {
+  const actionable = actionableComments(comments);
+  if (actionable.length === 0) {
     return (
       `The human reviewed plan ${where}and requested changes without leaving specific comments.\n` +
       `Reconsider the plan critically — look for gaps, risks, and unstated assumptions — improve it, ` +
@@ -103,8 +116,8 @@ export function compileRejection(
   const sections: string[] = [
     `The human reviewed plan ${where}and requested changes. Address EVERY comment below, then ${again}`,
   ];
-  for (const slug of orderedDocs(comments, manifest)) {
-    const docComments = comments.filter((c) => c.doc === slug);
+  for (const slug of orderedDocs(actionable, manifest)) {
+    const docComments = actionable.filter((c) => c.doc === slug);
     const line = docComments
       .filter((c) => c.line != null)
       .sort(bySideThenLine);
@@ -126,14 +139,15 @@ export function compileApproval(
   manifest: Manifest | undefined,
   resolve: LineSliceResolver,
 ): string {
-  if (comments.length === 0) return '';
-  const count = comments.length;
+  const actionable = actionableComments(comments);
+  if (actionable.length === 0) return '';
+  const count = actionable.length;
   const s = count === 1 ? '' : 's';
   const sections: string[] = [
     `The human APPROVED the plan with ${count} comment${s}. Proceed with implementation and incorporate these note${s}:`,
   ];
-  for (const slug of orderedDocs(comments, manifest)) {
-    const docComments = comments.filter((c) => c.doc === slug);
+  for (const slug of orderedDocs(actionable, manifest)) {
+    const docComments = actionable.filter((c) => c.doc === slug);
     const line = docComments
       .filter((c) => c.line != null)
       .sort(bySideThenLine);

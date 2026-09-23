@@ -12,6 +12,9 @@ import { PlanValidationError } from '../util/errors.js';
 import { VersionStore } from './versions.js';
 import type { ProjectStore } from './projects.js';
 import type { ReviewStore } from './reviews.js';
+import { CommentStore } from './comments.js';
+import { carryOpenThreads } from './carry.js';
+import { resolvePlanImages, rewriteImageRefs, unresolvedImageRefs, type PlanImageInput } from './images.js';
 
 export interface StructuredDoc {
   slug: string;
@@ -28,6 +31,8 @@ export interface RecordInput {
   /** Exactly one of: raw plan markdown (markers allowed) or structured docs. */
   markdown?: string;
   docs?: StructuredDoc[];
+  /** Images attached to this submission, referenced from the text as `image:<name>`. */
+  images?: PlanImageInput[];
 }
 
 export interface RecordOutput extends RecordPlanResult {
@@ -50,6 +55,12 @@ export async function recordPlan(
   port: number,
   input: RecordInput,
 ): Promise<RecordOutput> {
+  // Attached images are stored (content-addressed) before anything is hashed or
+  // written, so `image:<name>` references become final URLs and the content hash
+  // covers the text that will actually be rendered.
+  const imageUrls = await resolvePlanImages(layout, input.images, input.cwd);
+  const withImages = (markdown: string): string => rewriteImageRefs(markdown, imageUrls);
+
   // --- normalize source ----------------------------------------------------
   let kind: 'single' | 'tree';
   let canonicalMarkdown: string | undefined;
@@ -63,7 +74,7 @@ export async function recordPlan(
       title: d.title,
       parent: d.parent ?? null,
     }));
-    bodies = new Map(input.docs.map((d) => [d.slug, d.markdown]));
+    bodies = new Map(input.docs.map((d) => [d.slug, withImages(d.markdown)]));
   } else if (typeof input.markdown === 'string' && input.markdown.trim()) {
     const parsed = parsePlan(input.markdown);
     if (parsed.malformedMarkers.length > 0) {
@@ -76,19 +87,36 @@ export async function recordPlan(
     }
     if (parsed.kind === 'single') {
       kind = 'single';
-      canonicalMarkdown = parsed.markdown;
-      docs = [{ slug: 'root', title: extractRootTitle(parsed.markdown), parent: null }];
-      bodies = new Map([['root', parsed.markdown]]);
+      const body = withImages(parsed.markdown);
+      canonicalMarkdown = body;
+      docs = [{ slug: 'root', title: extractRootTitle(body), parent: null }];
+      bodies = new Map([['root', body]]);
     } else {
       kind = 'tree';
       docs = parsed.docs.map((d) => ({ slug: d.slug, title: d.title, parent: d.parent, marker: d.marker }));
-      bodies = new Map(parsed.docs.map((d) => [d.slug, d.markdown]));
+      bodies = new Map(parsed.docs.map((d) => [d.slug, withImages(d.markdown)]));
     }
   } else {
     throw new PlanValidationError([{ message: 'The plan is empty — nothing to record.' }]);
   }
 
   // --- validate -------------------------------------------------------------
+  // A plan that points at an image nobody attached would render broken, so fail
+  // loudly and name the offending references.
+  const unresolved = new Set<string>();
+  for (const markdown of bodies.values()) {
+    for (const name of unresolvedImageRefs(markdown)) unresolved.add(name);
+  }
+  if (unresolved.size > 0) {
+    throw new PlanValidationError(
+      [...unresolved].map((name) => ({
+        message:
+          `Image "image:${name}" is not attached. Pass it in images[] ` +
+          `({ name: "${name}", path: "…" } or { name: "${name}", dataBase64: "…" }), ` +
+          `or upload it first (POST /api/images) and link the returned URL directly.`,
+      })),
+    );
+  }
   const issues = validateDocs(docs as ValidatableDoc[], bodies);
   if (issues.length > 0) throw new PlanValidationError(issues);
 
@@ -123,7 +151,7 @@ export async function recordPlan(
   const hash =
     kind === 'single'
       ? hashContent('single', canonicalMarkdown)
-      : hashContent('tree', input.docs ?? [...bodies.entries()].map(([slug, markdown]) => ({ slug, markdown })));
+      : hashContent('tree', [...bodies.entries()].map(([slug, markdown]) => ({ slug, markdown })));
 
   let version: number;
   let deduped = false;
@@ -136,12 +164,18 @@ export async function recordPlan(
     deduped = true;
     if (kind === 'tree') manifest = await versionStore.readManifest(key, version) ?? undefined;
   } else {
+    const previousVersion = meta.currentVersion;
     version = meta.currentVersion + 1;
     if (kind === 'single') {
       await versionStore.write(key, { n: version, kind: 'single', hash, markdown: canonicalMarkdown! });
     } else {
       const treeDocs: ParsedDoc[] = input.docs
-        ? input.docs.map((d) => ({ slug: d.slug, title: d.title, parent: d.parent ?? null, markdown: d.markdown }))
+        ? input.docs.map((d) => ({
+            slug: d.slug,
+            title: d.title,
+            parent: d.parent ?? null,
+            markdown: bodies.get(d.slug) ?? d.markdown,
+          }))
         : [...bodies.entries()].map(([slug, md]) => ({
             slug,
             markdown: md,
@@ -165,6 +199,21 @@ export async function recordPlan(
     meta.latestHash = hash;
     meta.updatedAt = new Date().toISOString();
     await projects.save(meta);
+
+    // Open threads from the revised version follow the plan, re-anchored.
+    if (previousVersion > 0) {
+      await carryOpenThreads({
+        comments: new CommentStore(layout),
+        versions: versionStore,
+        key,
+        fromN: previousVersion,
+        toN: version,
+        toKind: kind,
+        toBodies: kind === 'single' ? new Map([['root', canonicalMarkdown!]]) : bodies,
+      }).catch(() => {
+        // Carry-forward is best-effort: never fail a submission over it.
+      });
+    }
   }
 
   // --- review request ------------------------------------------------------------

@@ -1,5 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { Comment, DiffDocEntry, DiffDocStatus, DiffResponse, VersionInfo } from '../../../shared/types.js';
+import { createContext, useContext } from 'react';
+import type { Comment, CommentThreadView, DiffDocEntry, DiffDocStatus, DiffResponse, VersionInfo } from '../../../shared/types.js';
+import { groupThreads } from '../../../shared/threads.js';
 import {
   computeHunks,
   diffSegments,
@@ -12,9 +14,9 @@ import {
 import { useApi } from '../../api/cache.js';
 import { endpoints, keys } from '../../api/endpoints.js';
 import { EmptyState, ErrorNote, Pill, Select, Spinner, cx } from '../primitives.js';
-import { IconChat, IconDiff, IconEye } from '../icons.js';
+import { IconChat, IconCheck, IconDiff, IconEye } from '../icons.js';
 import { CommentComposer, type ComposerState } from '../comments/CommentComposer.js';
-import { CommentCard } from '../comments/CommentThread.js';
+import { CommentThread } from '../comments/CommentThread.js';
 
 export type DiffSide = 'old' | 'new';
 
@@ -28,6 +30,17 @@ export interface DiffCommentInput {
   body: string;
 }
 
+/** A word-level selection resolved to a diff anchor. */
+interface SelectionCommentArgs {
+  doc: string;
+  side: DiffSide;
+  line: number;
+  lineEnd: number;
+  quote: string;
+  x: number;
+  y: number;
+}
+
 export interface DiffViewProps {
   projectKey: string;
   versions: VersionInfo[];
@@ -38,9 +51,67 @@ export interface DiffViewProps {
   comments: Comment[];
   onAddComment: (input: DiffCommentInput) => Promise<void>;
   onDeleteComment: (id: string) => void;
+  onReply: (rootId: string, body: string) => Promise<void>;
+  onResolve: (rootId: string, resolved: boolean) => void;
 }
 
 type Mode = 'split' | 'unified';
+
+/** Slugs of pages marked reviewed for the current diff pair. */
+const ViewedDocsContext = createContext<{
+  viewed: Set<string>;
+  toggle: (slug: string) => void;
+}>({ viewed: new Set(), toggle: () => {} });
+
+/**
+ * Per-page "viewed" flags for one diff pair, persisted in localStorage so the
+ * review survives reloads. The key includes the diff pair, so switching base
+ * or target versions starts a fresh review pass.
+ */
+export function useViewedDocs(projectKey: string, from: number | null, to: number | null) {
+  const pairKey = from != null && to != null ? `${projectKey}:${from}:${to}` : null;
+  const [viewed, setViewed] = useState<Set<string>>(() => readViewed(pairKey));
+
+  useEffect(() => {
+    setViewed(readViewed(pairKey));
+  }, [pairKey]);
+
+  const toggle = useCallback(
+    (slug: string) => {
+      if (!pairKey) return;
+      setViewed((prev) => {
+        const next = new Set(prev);
+        if (next.has(slug)) next.delete(slug);
+        else next.add(slug);
+        writeViewed(pairKey, next);
+        return next;
+      });
+    },
+    [pairKey],
+  );
+
+  return { viewed, toggleViewed: toggle };
+}
+
+const VIEWED_PREFIX = 'plan-review.viewed:';
+
+function readViewed(pairKey: string | null): Set<string> {
+  if (!pairKey) return new Set();
+  try {
+    const raw = window.localStorage.getItem(VIEWED_PREFIX + pairKey);
+    return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function writeViewed(pairKey: string, viewed: Set<string>): void {
+  try {
+    window.localStorage.setItem(VIEWED_PREFIX + pairKey, JSON.stringify([...viewed]));
+  } catch {
+    // Storage full or unavailable — viewed state just won't persist.
+  }
+}
 
 /**
  * Version diff, GitHub "files changed" style: every page of the plan in one
@@ -55,6 +126,8 @@ export function DiffView({
   comments,
   onAddComment,
   onDeleteComment,
+  onReply,
+  onResolve,
 }: DiffViewProps) {
   const others = versions.filter((v) => v.n !== activeVersion);
   const [base, setBase] = useState<number | null>(null);
@@ -63,9 +136,13 @@ export function DiffView({
   const [gapOverride, setGapOverride] = useState<Map<string, boolean>>(new Map());
   const [collapsedDocs, setCollapsedDocs] = useState<Set<string>>(new Set());
   const [composer, setComposer] = useState<{ state: ComposerState; doc: string; side: DiffSide } | null>(null);
+  const [bubble, setBubble] = useState<{ x: number; y: number; args: SelectionCommentArgs } | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   const fromVersion =
     base ?? others.find((v) => v.n === activeVersion - 1)?.n ?? others[others.length - 1]?.n ?? null;
+
+  const { viewed, toggleViewed } = useViewedDocs(projectKey, fromVersion, activeVersion);
 
   const { data, loading, error, reload } = useApi<DiffResponse>(
     fromVersion != null ? keys.diff(projectKey, fromVersion, activeVersion) : null,
@@ -130,11 +207,11 @@ export function DiffView({
     setGapOverride((prev) => new Map(prev).set(key, !currentlyOpen));
   }, []);
 
-  const toggleDoc = useCallback((slug: string) => {
+  const toggleDoc = useCallback((slug: string, collapsed: boolean) => {
     setCollapsedDocs((prev) => {
       const next = new Set(prev);
-      if (next.has(slug)) next.delete(slug);
-      else next.add(slug);
+      if (collapsed) next.add(slug);
+      else next.delete(slug);
       return next;
     });
   }, []);
@@ -150,7 +227,93 @@ export function DiffView({
     [],
   );
 
-  if (versions.length <= 1) {
+  // ---------------------------------------------------------------------------
+  // selection → comment affordance (word-level, like the preview pane)
+  // ---------------------------------------------------------------------------
+
+  const handleMouseUp = useCallback(() => {
+    // Let click handlers settle first.
+    setTimeout(() => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+        setBubble(null);
+        return;
+      }
+      const text = sel.toString();
+      if (!text.trim()) {
+        setBubble(null);
+        return;
+      }
+      const range = sel.getRangeAt(0);
+      const container = scrollRef.current;
+      if (!container || !container.contains(range.commonAncestorContainer)) {
+        setBubble(null);
+        return;
+      }
+
+      const anchorCell = findCell(sel.anchorNode);
+      const focusCell = findCell(sel.focusNode);
+      if (!anchorCell || !focusCell) {
+        setBubble(null);
+        return;
+      }
+
+      // Side from the cell where the selection starts; a span that crosses
+      // sides (shouldn't happen — gutter cells aren't selectable) is dropped.
+      const side = anchorCell.dataset.side as DiffSide | undefined;
+      if (!side || side !== focusCell.dataset.side) {
+        setBubble(null);
+        return;
+      }
+
+      const doc = anchorCell.closest<HTMLElement>('section[data-slug]')?.dataset.slug;
+      if (!doc) {
+        setBubble(null);
+        return;
+      }
+
+      const lineOf = (cell: HTMLElement): number | null => {
+        const raw = Number(cell.dataset.line);
+        return Number.isFinite(raw) && raw > 0 ? raw : null;
+      };
+      const anchorLine = lineOf(anchorCell);
+      const focusLine = lineOf(focusCell);
+      if (anchorLine == null || focusLine == null) {
+        setBubble(null);
+        return;
+      }
+      const line = Math.min(anchorLine, focusLine);
+      const lineEnd = Math.max(anchorLine, focusLine);
+
+      const rect = range.getBoundingClientRect();
+      setBubble({
+        x: Math.min(Math.max(8, rect.left + rect.width / 2 - 44), Math.max(8, window.innerWidth - 118)),
+        // Keep it below the scroll container's top edge, or it lands on the toolbar.
+        y: Math.max((scrollRef.current?.getBoundingClientRect().top ?? 0) + 8, rect.top - 46),
+        args: {
+          doc,
+          side,
+          line,
+          lineEnd,
+          quote: text.replace(/\s+/g, ' ').trim().slice(0, 2000),
+          x: rect.left + rect.width / 2 - 190,
+          y: Math.max(8, rect.top - 46) + 40,
+        },
+      });
+    }, 10);
+  }, []);
+
+  const openSelectionComposer = useCallback(() => {
+    if (!bubble) return;
+    openComposer(bubble.args);
+    setBubble(null);
+    window.getSelection()?.removeAllRanges();
+  }, [bubble, openComposer]);
+
+  // Clear stale affordances when the diff payload changes.
+  useEffect(() => {
+    setBubble(null);
+  }, [data]);  if (versions.length <= 1) {
     return (
       <EmptyState
         icon={<IconDiff className="h-8 w-8" />}
@@ -227,8 +390,13 @@ export function DiffView({
         </div>
       </div>
 
-      {/* content */}
-      <div className="min-h-0 flex-1 overflow-auto px-5 py-4 max-md:px-2">
+      {/* content —
+        * The vertical padding lives on an inner wrapper, not on this scroll
+        * container: padding on the scroller leaves a ~16px band exposed above
+        * `position: sticky; top: 0` headers, so rows scroll through the gap
+        * instead of disappearing under the stuck header. */}
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto px-5 max-md:px-2" onMouseUp={handleMouseUp}>
+        <div className="py-4">
         {loading && !data && <Spinner label="Computing diff…" />}
         {error && <ErrorNote message={error} onRetry={reload} />}
         {data && changedCount === 0 && (
@@ -239,26 +407,44 @@ export function DiffView({
           />
         )}
         {data && changedCount > 0 && (
-          <div className="mx-auto flex max-w-full flex-col gap-5">
-            {visibleDocs.map((entry) => (
-              <DocSection
-                key={entry.slug}
-                entry={entry}
-                diff={diffs.get(entry.slug)}
-                mode={mode}
-                comments={comments.filter((c) => c.doc === entry.slug)}
-                commentIndex={commentIndex}
-                gapOverride={gapOverride}
-                onToggleGap={toggleGap}
-                collapsed={collapsedDocs.has(entry.slug)}
-                onToggleCollapse={() => toggleDoc(entry.slug)}
-                onComment={openComposer}
-                onDeleteComment={onDeleteComment}
-              />
-            ))}
-          </div>
+          <ViewedDocsContext.Provider value={{ viewed, toggle: toggleViewed }}>
+            <div className="mx-auto flex max-w-full flex-col gap-5">
+              {visibleDocs.map((entry) => (
+                <DocSection
+                  key={entry.slug}
+                  entry={entry}
+                  diff={diffs.get(entry.slug)}
+                  mode={mode}
+                  comments={comments.filter((c) => c.doc === entry.slug)}
+                  commentIndex={commentIndex}
+                  gapOverride={gapOverride}
+                  onToggleGap={toggleGap}
+                  collapsed={collapsedDocs.has(entry.slug)}
+                  onSetCollapsed={(collapsed) => toggleDoc(entry.slug, collapsed)}
+                  onComment={openComposer}
+                  onDeleteComment={onDeleteComment}
+                  onReply={onReply}
+                  onResolve={onResolve}
+                />
+              ))}
+            </div>
+          </ViewedDocsContext.Provider>
         )}
+        </div>
       </div>
+
+      {/* Selection affordance */}
+      {bubble && (
+        <button
+          className="fixed z-30 flex animate-pop items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-[12.5px] font-medium text-accent-ink shadow-pop transition-transform hover:scale-[1.03]"
+          style={{ left: bubble.x, top: bubble.y }}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={openSelectionComposer}
+        >
+          <IconChat className="h-3.5 w-3.5" />
+          Comment
+        </button>
+      )}
 
       {composer && (
         <CommentComposer
@@ -295,7 +481,7 @@ interface DocSectionProps {
   gapOverride: Map<string, boolean>;
   onToggleGap: (key: string, currentlyOpen: boolean) => void;
   collapsed: boolean;
-  onToggleCollapse: () => void;
+  onSetCollapsed: (collapsed: boolean) => void;
   onComment: (args: {
     doc: string;
     side: DiffSide;
@@ -306,6 +492,8 @@ interface DocSectionProps {
     y: number;
   }) => void;
   onDeleteComment: (id: string) => void;
+  onReply: (rootId: string, body: string) => Promise<void>;
+  onResolve: (rootId: string, resolved: boolean) => void;
 }
 
 function DocSection({
@@ -317,15 +505,65 @@ function DocSection({
   gapOverride,
   onToggleGap,
   collapsed,
-  onToggleCollapse,
+  onSetCollapsed,
   onComment,
   onDeleteComment,
+  onReply,
+  onResolve,
 }: DocSectionProps) {
   // Each mode hunks its own row list, so collapse offsets always index it.
   const rows = useMemo(() => (diff ? toViewRows(diff, mode) : []), [diff, mode]);
   const segments = useMemo(() => diffSegments(rows, computeHunks(rows)), [rows]);
   const general = comments.filter((c) => c.line == null);
   const unchanged = entry.status === 'unchanged';
+  const { viewed, toggle } = useContext(ViewedDocsContext);
+  const isViewed = viewed.has(entry.slug);
+
+  // Threads render once, at the row their ROOT anchors to (replies inherit the
+  // root's anchor, so a multi-line thread must not repeat on every row).
+  const threadsByAnchor = useMemo(() => {
+    const map = new Map<string, CommentThreadView[]>();
+    for (const thread of groupThreads(comments.filter((c) => c.line != null))) {
+      const key = indexKey(thread.root.doc, commentSide(thread.root), thread.root.line!);
+      const bucket = map.get(key);
+      if (bucket) bucket.push(thread);
+      else map.set(key, [thread]);
+    }
+    return map;
+  }, [comments]);
+  const generalThreads = useMemo(() => groupThreads(general), [general]);
+  // Only OPEN threads light up a line. A resolved thread still renders below (so
+  // it can be read or reopened) but must stop claiming the line is under
+  // discussion — the highlight is the reviewer's "still to do" signal.
+  const activeIndex = useMemo(() => {
+    const closed = new Set(comments.filter((c) => c.resolved).map((c) => c.id));
+    const map = new Map<string, Comment[]>();
+    for (const c of comments) {
+      if (c.line == null) continue;
+      if (closed.has(c.parentId ?? c.id)) continue;
+      const side = commentSide(c);
+      const end = Math.min(c.lineEnd ?? c.line, c.line + 400);
+      for (let line = c.line; line <= end; line++) {
+        const key = indexKey(c.doc, side, line);
+        const bucket = map.get(key);
+        if (bucket) bucket.push(c);
+        else map.set(key, [c]);
+      }
+    }
+    return map;
+  }, [comments]);
+  // Threads anchored to a line; needed for pages whose body is unchanged, where
+  // there are no diff rows to hang them under.
+  const anchoredThreads = useMemo(() => groupThreads(comments.filter((c) => c.line != null)), [comments]);
+  const threadCount = anchoredThreads.length + generalThreads.length;
+
+  // GitHub-style: marking a page reviewed also folds it away (and un-reviewing
+  // reopens it), instead of leaving two independent per-page states.
+  const handleViewedToggle = (): void => {
+    const next = !isViewed;
+    toggle(entry.slug);
+    onSetCollapsed(next);
+  };
 
   // Gaps that hide a comment open automatically so no thread is ever invisible.
   const autoOpenGaps = useMemo(() => {
@@ -341,10 +579,10 @@ function DocSection({
   }, [rows, segments, comments.length, commentIndex, entry.slug]);
 
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-surface-1 shadow-card">
+    <section data-slug={entry.slug} className={cx('diff-doc rounded-xl border border-border bg-surface-1 shadow-card', isViewed && 'diff-doc-viewed')}>
       <header className="diff-doc-header">
         <button
-          onClick={onToggleCollapse}
+          onClick={() => onSetCollapsed(!collapsed)}
           disabled={unchanged}
           className="text-ink-faint transition-colors hover:text-ink disabled:opacity-40"
           aria-label="Toggle page"
@@ -352,8 +590,13 @@ function DocSection({
         >
           <span className={cx('inline-block text-[10px] transition-transform', !collapsed && 'rotate-90')}>▶</span>
         </button>
-        <span className="text-[13.5px] font-semibold text-ink">{entry.title}</span>
-        <span className="font-mono text-[11px] text-ink-faint">{entry.slug}</span>
+        <span
+          className="min-w-0 truncate text-[13.5px] font-semibold text-ink"
+          title={entry.title}
+        >
+          {entry.title}
+        </span>
+        <span className="hidden font-mono text-[11px] text-ink-faint sm:inline">{entry.slug}</span>
         <StatusPill status={entry.status} />
         <span className="flex-1" />
         {diff && (
@@ -367,6 +610,14 @@ function DocSection({
           </span>
         )}
         {unchanged && <span className="text-[11.5px] text-ink-faint">no changes</span>}
+        {collapsed && threadCount > 0 && (
+          <span className="text-[11.5px] text-ink-faint">
+            {threadCount} hidden thread{threadCount === 1 ? '' : 's'}
+          </span>
+        )}
+        {!unchanged && (
+          <ViewedButton viewed={isViewed} onToggle={handleViewedToggle} />
+        )}
       </header>
 
       {!collapsed && diff && (
@@ -391,16 +642,18 @@ function DocSection({
                       .map((row, offset) => (
                         <Fragment key={segment.start + offset}>
                           {mode === 'split' ? (
-                            <SplitRow row={row} doc={entry.slug} commentIndex={commentIndex} onComment={onComment} />
+                            <SplitRow row={row} doc={entry.slug} commentIndex={activeIndex} onComment={onComment} />
                           ) : (
-                            <UnifiedRow row={row} doc={entry.slug} commentIndex={commentIndex} onComment={onComment} />
+                            <UnifiedRow row={row} doc={entry.slug} commentIndex={activeIndex} onComment={onComment} />
                           )}
                           {threadRow({
                             row,
                             mode,
                             doc: entry.slug,
-                            commentIndex,
+                            threadsByAnchor,
                             onDelete: onDeleteComment,
+                            onReply,
+                            onResolve,
                           })}
                         </Fragment>
                       ))
@@ -412,12 +665,40 @@ function DocSection({
         </div>
       )}
 
-      {!collapsed && general.length > 0 && (
+      {!collapsed && unchanged && anchoredThreads.length > 0 && (
+        <div className="border-t border-border px-3.5 py-3">
+          <h4 className="mb-2 text-[11.5px] font-semibold tracking-wide text-ink-faint uppercase">
+            Comments on this page
+          </h4>
+          <div className="flex flex-col">
+            {anchoredThreads.map((thread) => (
+              <CommentThread
+                key={thread.root.id}
+                thread={thread}
+                onDelete={onDeleteComment}
+                onReply={onReply}
+                onResolve={onResolve}
+                label={thread.root.side === 'old' ? `removed in v${thread.root.baseVersion ?? '?'}` : undefined}
+                compact
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {!collapsed && generalThreads.length > 0 && (
         <div className="border-t border-border px-3.5 py-3">
           <h4 className="mb-2 text-[11.5px] font-semibold tracking-wide text-ink-faint uppercase">General notes</h4>
-          <div className="flex flex-col gap-2">
-            {general.map((c) => (
-              <CommentCard key={c.id} comment={c} onDelete={() => onDeleteComment(c.id)} />
+          <div className="flex flex-col">
+            {generalThreads.map((thread) => (
+              <CommentThread
+                key={thread.root.id}
+                thread={thread}
+                onDelete={onDeleteComment}
+                onReply={onReply}
+                onResolve={onResolve}
+                compact
+              />
             ))}
           </div>
         </div>
@@ -431,6 +712,24 @@ function StatusPill({ status }: { status: DiffDocStatus }) {
   if (status === 'removed') return <Pill tone="danger">removed</Pill>;
   if (status === 'modified') return <Pill tone="accent">modified</Pill>;
   return <Pill tone="neutral">unchanged</Pill>;
+}
+
+/** "Mark as reviewed" toggle in the sticky page header, GitHub file-viewed style. */
+function ViewedButton({ viewed, onToggle }: { viewed: boolean; onToggle: () => void }) {
+  return (
+    <button
+      onClick={onToggle}
+      className={cx(
+        'diff-viewed-btn',
+        viewed ? 'diff-viewed-btn-on' : 'diff-viewed-btn-off',
+      )}
+      title={viewed ? 'Mark as not reviewed' : 'Mark as reviewed'}
+      aria-pressed={viewed}
+    >
+      <IconCheck className="h-3 w-3" />
+      {viewed ? 'Reviewed' : 'Mark as reviewed'}
+    </button>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -467,7 +766,11 @@ function SplitRow({ row, doc, commentIndex, onComment }: RowProps) {
           }
         />
       </td>
-      <td className={cx(leftCls, !row.oldText && row.oldLine == null && 'opacity-40')}>
+      <td
+        className={cx(leftCls, !row.oldText && row.oldLine == null && 'opacity-40')}
+        data-side="old"
+        data-line={row.oldLine ?? ''}
+      >
         <span className="diff-sign">{row.kind !== 'eq' ? '−' : ' '}</span>
         {row.oldLine == null ? '' : row.oldText}
       </td>
@@ -481,7 +784,11 @@ function SplitRow({ row, doc, commentIndex, onComment }: RowProps) {
           }
         />
       </td>
-      <td className={cx(rightCls, !row.newText && row.newLine == null && 'opacity-40')}>
+      <td
+        className={cx(rightCls, !row.newText && row.newLine == null && 'opacity-40')}
+        data-side="new"
+        data-line={row.newLine ?? ''}
+      >
         <span className="diff-sign">{row.kind !== 'eq' ? '+' : ' '}</span>
         {row.newLine == null ? '' : row.newText}
       </td>
@@ -491,6 +798,9 @@ function SplitRow({ row, doc, commentIndex, onComment }: RowProps) {
 
 function UnifiedRow({ row, doc, commentIndex, onComment }: RowProps) {
   const cls = row.kind === 'add' ? 'diff-add' : row.kind === 'del' ? 'diff-del' : '';
+  const side = row.kind === 'del' ? 'old' : 'new';
+  const line = row.kind === 'del' ? row.oldLine : row.newLine;
+  const text = row.kind === 'add' ? row.newText : row.oldText || row.newText;
   return (
     <tr className={cls}>
       <td className="diff-ln">
@@ -513,9 +823,9 @@ function UnifiedRow({ row, doc, commentIndex, onComment }: RowProps) {
           }
         />
       </td>
-      <td>
+      <td data-side={side} data-line={line ?? ''}>
         <span className="diff-sign">{row.kind === 'add' ? '+' : row.kind === 'del' ? '−' : ' '}</span>
-        {row.kind === 'add' ? row.newText : row.oldText || row.newText}
+        {text}
       </td>
     </tr>
   );
@@ -557,32 +867,38 @@ function threadRow({
   row,
   mode,
   doc,
-  commentIndex,
+  threadsByAnchor,
   onDelete,
+  onReply,
+  onResolve,
 }: {
   row: ViewRow;
   mode: Mode;
   doc: string;
-  commentIndex: Map<string, Comment[]>;
+  threadsByAnchor: Map<string, CommentThreadView[]>;
   onDelete: (id: string) => void;
+  onReply: (rootId: string, body: string) => Promise<void>;
+  onResolve: (rootId: string, resolved: boolean) => void;
 }): ReactNode {
-  const anchored = new Map<string, Comment>();
+  const threads: CommentThreadView[] = [];
   for (const side of ['old', 'new'] as DiffSide[]) {
     const line = side === 'old' ? row.oldLine : row.newLine;
     if (line == null) continue;
-    for (const c of commentIndex.get(indexKey(doc, side, line)) ?? []) anchored.set(c.id, c);
+    threads.push(...(threadsByAnchor.get(indexKey(doc, side, line)) ?? []));
   }
-  if (anchored.size === 0) return null;
+  if (threads.length === 0) return null;
   return (
     <tr className="diff-thread">
       <td colSpan={mode === 'split' ? 4 : 3}>
-        <div className="flex flex-col gap-2 py-1">
-          {[...anchored.values()].map((c) => (
-            <CommentCard
-              key={c.id}
-              comment={c}
-              onDelete={() => onDelete(c.id)}
-              label={c.side === 'old' ? `removed in v${c.baseVersion ?? '?'}` : undefined}
+        <div className="flex flex-col">
+          {threads.map((thread) => (
+            <CommentThread
+              key={thread.root.id}
+              thread={thread}
+              onDelete={onDelete}
+              onReply={onReply}
+              onResolve={onResolve}
+              label={thread.root.side === 'old' ? `removed in v${thread.root.baseVersion ?? '?'}` : undefined}
             />
           ))}
         </div>
@@ -633,6 +949,16 @@ function GapRow({
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/** Nearest selectable diff content cell (`[data-side]`) around a DOM node. */
+function findCell(node: Node | null): HTMLElement | null {
+  let cur: Node | null = node;
+  while (cur) {
+    if (cur instanceof HTMLElement && cur.dataset.side != null) return cur;
+    cur = cur.parentNode;
+  }
+  return null;
+}
 
 function commentSide(c: Comment): DiffSide {
   return c.side === 'old' ? 'old' : 'new';

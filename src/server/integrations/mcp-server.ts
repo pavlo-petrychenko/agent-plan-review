@@ -1,5 +1,6 @@
 /**
- * MCP stdio server: `plan_review_submit` + `plan_review_check`.
+ * MCP stdio server: `plan_review_submit` + `plan_review_check` (+ reply and
+ * attach-image helpers).
  *
  * Newline-delimited JSON-RPC over stdin/stdout, hand-rolled to keep the
  * dependency footprint at zero. Submit validates and records through the
@@ -12,10 +13,11 @@
 
 import { APP_NAME, APP_VERSION, checkProgressIntervalMs, loadConfig, maxCheckWaitSeconds } from '../config.js';
 import { PlanReviewStore } from '../store/store.js';
-import { PlanValidationError } from '../util/errors.js';
+import { storePlanImage } from '../store/images.js';
+import { ApiError, PlanValidationError } from '../util/errors.js';
 import { sameProjectCwd } from '../util/project-cwd.js';
 import { compileIssues } from '../../shared/compile.js';
-import type { Review } from '../../shared/types.js';
+import type { Comment, Review } from '../../shared/types.js';
 import { ensureServerRunning } from './spawn-server.js';
 import { openBrowser } from './browser.js';
 
@@ -55,6 +57,37 @@ const TOOLS = [
             },
           },
         },
+        images: {
+          type: 'array',
+          description:
+            'Images to embed in the plan. Reference each one from the markdown as ![alt](image:<name>) and it is '
+            + 'rewritten to a served URL. Screenshots are stored content-addressed, so re-submitting the same file '
+            + 'costs nothing.',
+          items: {
+            type: 'object',
+            required: ['name'],
+            properties: {
+              name: { type: 'string', description: 'Short handle used as image:<name> in the markdown.' },
+              path: { type: 'string', description: 'Path to the image file (absolute, or relative to cwd).' },
+              dataBase64: { type: 'string', description: 'Or the bytes inline as base64 (a data: URL is accepted).' },
+            },
+          },
+        },
+      },
+    },
+  },
+  {
+    name: 'plan_review_attach_image',
+    description:
+      'Store one image and get back a URL to embed in a plan (useful when the plan is composed after the '
+      + 'screenshot was taken). Equivalent to passing images[] to plan_review_submit.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Path to the image file (absolute, or relative to cwd).' },
+        dataBase64: { type: 'string', description: 'Or the bytes inline as base64.' },
+        name: { type: 'string', description: 'Optional handle, returned for convenience.' },
+        cwd: { type: 'string', description: 'Base directory for a relative path. Defaults to the MCP server cwd.' },
       },
     },
   },
@@ -63,14 +96,34 @@ const TOOLS = [
     description:
       'Wait for the human decision on a submitted plan. TRUE LONG-POLL: returns the moment the ' +
       'decision lands or wait_seconds elapses, whichever is first — so ONE long call beats a loop ' +
-      'of short calls (recommended: wait_seconds=172800). If your harness moves the call to the ' +
-      'background (Claude Code auto-backgrounds after ~2 min): do NOT call again and do NOT ' +
-      're-submit; the result arrives automatically when the human decides.',
+      'of short calls (recommended: wait_seconds=172800). It ALSO returns early when the human ' +
+      'writes to a comment thread: the result then has status "pending" with newComments — answer ' +
+      'each via plan_review_reply (commentId = threadId), then call plan_review_check again. If your ' +
+      'harness moves the call to the background (Claude Code auto-backgrounds after ~2 min): do NOT ' +
+      'call again and do NOT re-submit; the result arrives automatically when the human decides.',
     inputSchema: {
       type: 'object',
       properties: {
         reviewId: { type: 'string', description: 'Review id from plan_review_submit. Omit to use the newest pending review in cwd.' },
         wait_seconds: { type: 'number', description: 'Max seconds to long-poll (default 0; ceiling AGENT_PLAN_REVIEW_MAX_WAIT, default 172800 = 48 h).' },
+        since: { type: 'string', description: 'Optional cursor from a previous check; omit — the server tracks what you have already seen.' },
+      },
+    },
+  },
+  {
+    name: 'plan_review_reply',
+    description:
+      'Reply to a human comment thread on a pending plan review. Use the threadId from ' +
+      'plan_review_check newComments. Threads are a conversation: answer questions, explain ' +
+      'trade-offs, ask for clarification. Not every thread needs a plan change. After replying, ' +
+      'call plan_review_check again to keep waiting for the decision or the next message.',
+    inputSchema: {
+      type: 'object',
+      required: ['commentId', 'body'],
+      properties: {
+        reviewId: { type: 'string', description: 'Review id; omit to use the newest pending review in cwd.' },
+        commentId: { type: 'string', description: 'threadId of the thread to reply to (from plan_review_check newComments).' },
+        body: { type: 'string', description: 'Your reply text.' },
       },
     },
   },
@@ -151,6 +204,8 @@ export async function runMcpServer(): Promise<void> {
   async function callTool(store: PlanReviewStore, name: string, args: Record<string, unknown>, meta?: Record<string, unknown>): Promise<unknown> {
     if (name === 'plan_review_submit') return submit(store, args);
     if (name === 'plan_review_check') return check(store, args, meta);
+    if (name === 'plan_review_reply') return reply(store, args);
+    if (name === 'plan_review_attach_image') return attachImage(store, args);
     return toolError(`Unknown tool: ${name}`);
   }
 
@@ -169,6 +224,9 @@ export async function runMcpServer(): Promise<void> {
     const docs = Array.isArray(args.docs)
       ? (args.docs as { slug: string; title: string; parent?: string | null; markdown: string }[])
       : undefined;
+    const images = Array.isArray(args.images)
+      ? (args.images as { name: string; path?: string; dataBase64?: string }[])
+      : undefined;
     const markdown =
       typeof args.markdown === 'string'
         ? args.markdown
@@ -183,6 +241,7 @@ export async function runMcpServer(): Promise<void> {
         origin: 'mcp',
         markdown,
         docs,
+        images,
       });
       if (!result.isLoser && !serverWarning) openBrowser(result.reviewUrl);
       return toolText(
@@ -199,6 +258,7 @@ export async function runMcpServer(): Promise<void> {
         ) +
           '\n\nPlan submitted for human review. Wait for the decision with ONE long call:\n' +
           'plan_review_check { "reviewId": "<id>", "wait_seconds": 172800 }. It is a true long-poll — it returns the moment the human decides, so one call is enough.\n' +
+          '- If the human writes to a comment thread, that same call returns early with status "pending" and newComments: answer each with plan_review_reply { "reviewId": "<id>", "commentId": "<threadId>", "body": "..." }, then call plan_review_check again. These are a conversation — not every thread needs a plan change.\n' +
           '- If your harness moves that call to the background (e.g. Claude Code after ~2 min), do NOT re-call and do NOT re-submit; you will be woken with the result.\n' +
           '- Never loop short waits; never re-submit while a review is pending.',
       );
@@ -206,12 +266,34 @@ export async function runMcpServer(): Promise<void> {
       if (err instanceof PlanValidationError) {
         return toolText(`The plan failed validation and was NOT recorded:\n${compileIssues(err.issues, 'plan_review_submit')}`);
       }
+      if (err instanceof ApiError) return toolText(`The plan was NOT recorded: ${err.message}`);
+      throw err;
+    }
+  }
+
+  /** Upload one image and hand back the URL/markdown to embed. */
+  async function attachImage(store: PlanReviewStore, args: Record<string, unknown>) {
+    const filePath = typeof args.path === 'string' && args.path.trim() ? args.path.trim() : undefined;
+    const dataBase64 = typeof args.dataBase64 === 'string' && args.dataBase64 ? args.dataBase64 : undefined;
+    const name = typeof args.name === 'string' && args.name.trim() ? args.name.trim() : 'image';
+    const cwd = typeof args.cwd === 'string' && args.cwd.trim() ? args.cwd.trim() : undefined;
+    if (!filePath && !dataBase64) return toolError('Provide path or dataBase64.');
+    try {
+      const stored = await storePlanImage(store.layout, { name, path: filePath, dataBase64 }, cwd);
+      return toolText(
+        `${JSON.stringify({ name, url: stored.url, bytes: stored.bytes, sha: stored.sha, contentType: stored.contentType }, null, 2)}\n\n` +
+          `Embed it as ![${name === 'image' ? 'caption' : name}](${stored.url}) — or reference it as ![caption](image:${name}) and pass ` +
+          `images: [{ name: "${name}", path: "…" }] to plan_review_submit.`,
+      );
+    } catch (err) {
+      if (err instanceof ApiError) return toolText(`Image was NOT stored: ${err.message}`);
       throw err;
     }
   }
 
   async function check(store: PlanReviewStore, args: Record<string, unknown>, meta?: Record<string, unknown>) {
     const wait = Math.min(Math.max(Number(args.wait_seconds ?? 0) || 0, 0), maxCheckWaitSeconds());
+    const since = typeof args.since === 'string' && args.since ? args.since : undefined;
     let review = await resolveReview(store, args);
     if (!review) {
       return toolText(JSON.stringify({ status: 'not_found' }) + '\n\nNo matching review found. Re-submit with plan_review_submit.');
@@ -229,6 +311,15 @@ export async function runMcpServer(): Promise<void> {
     while (review.status === 'pending' && Date.now() < deadline) {
       await sleep(300);
       review = (await store.getReview(review.id)) ?? review;
+      if (review.status !== 'pending') break;
+
+      // The human wrote to a thread: hand it over so the agent can answer.
+      const messages = await store.getReviewMessages(review.id, since);
+      if (messages.comments.length > 0) {
+        await store.markAgentCursor(review.id, messages.cursor);
+        return pendingWithComments(review, messages.comments, messages.cursor);
+      }
+
       const now = Date.now();
       if (now - lastProgress >= intervalMs && review.status === 'pending') {
         lastProgress = now;
@@ -260,6 +351,26 @@ export async function runMcpServer(): Promise<void> {
     );
   }
 
+  async function reply(store: PlanReviewStore, args: Record<string, unknown>) {
+    const commentId = typeof args.commentId === 'string' ? args.commentId : '';
+    const body = typeof args.body === 'string' ? args.body.trim() : '';
+    if (!commentId) return toolError('commentId is required (the threadId from plan_review_check newComments)');
+    if (!body) return toolError('body is required');
+
+    const review = await resolveReview(store, args);
+    if (!review) return toolError('No matching pending review found.');
+    const { comment: created, version } = await store.replyToThread(
+      review.projectKey,
+      review.version,
+      commentId,
+      body,
+    );
+    return toolText(
+      `${JSON.stringify({ status: 'replied', commentId: created.parentId ?? created.id, version })}\n\n` +
+        'Reply posted. Call plan_review_check again to keep waiting for the decision or the next human message.',
+    );
+  }
+
   async function resolveReview(store: PlanReviewStore, args: Record<string, unknown>): Promise<Review | undefined> {
     if (typeof args.reviewId === 'string' && args.reviewId) {
       return (await store.getReview(args.reviewId)) ?? undefined;
@@ -276,6 +387,28 @@ export async function runMcpServer(): Promise<void> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Present new human messages as a conversation turn the agent can answer. */
+function pendingWithComments(review: Review, comments: Comment[], cursor: string | null) {
+  const messages = comments.map((c) => ({
+    threadId: c.parentId ?? c.id,
+    commentId: c.id,
+    author: c.author,
+    doc: c.doc,
+    line: c.line,
+    lineEnd: c.lineEnd,
+    quote: c.quote,
+    body: c.body,
+    createdAt: c.createdAt,
+  }));
+  return toolText(
+    `${JSON.stringify({ status: 'pending', reviewId: review.id, cursor, newComments: messages }, null, 2)}\n\n` +
+      'The human wrote to you. This is a DISCUSSION thread — answer with plan_review_reply ' +
+      '{ "reviewId": "' + review.id + '", "commentId": "<threadId>", "body": "..." } for each. ' +
+      'Then call plan_review_check again to keep waiting for the decision or the next message. ' +
+      'Only revise and re-submit the plan if the discussion calls for a change.',
+  );
 }
 
 function toolText(text: string) {

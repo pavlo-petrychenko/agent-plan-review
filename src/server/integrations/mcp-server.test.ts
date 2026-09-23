@@ -124,6 +124,44 @@ function decideReview(home: string, reviewId: string, status: 'approved' | 'reje
   fs.writeFileSync(file, JSON.stringify(raw));
 }
 
+/** Append a human comment to a review's version — what the UI/API does. */
+function addHumanComment(home: string, reviewId: string, body: string): string {
+  const review = JSON.parse(
+    fs.readFileSync(path.join(home, 'reviews', `${reviewId}.json`), 'utf8'),
+  ) as { projectKey: string; version: number };
+  const dir = path.join(home, 'projects', review.projectKey, 'comments');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${String(review.version).padStart(4, '0')}.json`);
+  const comments = fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>[]) : [];
+  const comment = {
+    id: `c${comments.length + 1}`,
+    doc: 'root',
+    line: 1,
+    lineEnd: 1,
+    quote: null,
+    body,
+    author: 'me',
+    createdAt: new Date().toISOString(),
+  };
+  comments.push(comment);
+  fs.writeFileSync(file, JSON.stringify(comments));
+  return comment.id;
+}
+
+function readComments(home: string, reviewId: string): Record<string, unknown>[] {
+  const review = JSON.parse(
+    fs.readFileSync(path.join(home, 'reviews', `${reviewId}.json`), 'utf8'),
+  ) as { projectKey: string; version: number };
+  const file = path.join(
+    home,
+    'projects',
+    review.projectKey,
+    'comments',
+    `${String(review.version).padStart(4, '0')}.json`,
+  );
+  return fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>[]) : [];
+}
+
 let home: string;
 
 beforeEach(async () => {
@@ -197,8 +235,7 @@ test('long polls emit periodic notifications/progress keepalives', async () => {
   }
 });
 
-test('submit steering text prescribes ONE long call and forbids resubmit-while-pending', async () => {
-  const driver = new McpDriver(home);
+test('submit steering text prescribes ONE long call and forbids resubmit-while-pending', async () => {  const driver = new McpDriver(home);
   try {
     await driver.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } });
     const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'apr-proj-'));
@@ -214,6 +251,42 @@ test('submit steering text prescribes ONE long call and forbids resubmit-while-p
     assert.match(check.description, /TRUE LONG-POLL/);
     assert.match(check.description, /recommended: wait_seconds.*172800/);
     assert.doesNotMatch(check.description, /Keep calling/);
+  } finally {
+    driver.close();
+  }
+});
+
+test('check surfaces a human thread message and plan_review_reply answers it once', async () => {
+  const driver = new McpDriver(home);
+  try {
+    const reviewId = await submitPlan(driver);
+
+    const call = driver.callTool('plan_review_check', { reviewId, wait_seconds: 30 });
+    await new Promise((r) => setTimeout(r, 500));
+    const commentId = addHumanComment(home, reviewId, 'why this approach?');
+    const text = await call;
+
+    assert.match(text, /"status":\s*"pending"/);
+    assert.match(text, /newComments/);
+    assert.match(text, /why this approach\?/);
+    assert.match(text, new RegExp(`"threadId":\\s*"${commentId}"`));
+
+    const replyText = await driver.callTool('plan_review_reply', {
+      reviewId,
+      commentId,
+      body: 'because of latency',
+    });
+    assert.match(replyText, /"status":\s*"replied"/);
+
+    const stored = readComments(home, reviewId);
+    const reply = stored.find((c) => c.author === 'agent');
+    assert.ok(reply, 'agent reply should be stored');
+    assert.equal(reply?.body, 'because of latency');
+    assert.equal(reply?.parentId, commentId);
+
+    // The cursor means the same message is not handed over twice.
+    const again = await driver.callTool('plan_review_check', { reviewId, wait_seconds: 1 });
+    assert.doesNotMatch(again, /why this approach\?/);
   } finally {
     driver.close();
   }

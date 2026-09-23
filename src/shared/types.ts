@@ -16,6 +16,9 @@ export type ReviewOrigin = 'hook' | 'mcp' | 'api';
 
 export type ReviewStatus = 'pending' | 'approved' | 'rejected';
 
+/** Who wrote a comment. The agent replies through the reply tool/endpoint. */
+export type CommentAuthor = 'me' | 'agent';
+
 /** A comment anchored either to source lines or to a document as a whole. */
 export interface Comment {
   id: string;
@@ -36,8 +39,22 @@ export interface Comment {
   /** Verbatim selected text, whitespace-normalized, capped at MAX_QUOTE_LEN. */
   quote: string | null;
   body: string;
-  author: 'me';
+  author: CommentAuthor;
   createdAt: string;
+  /**
+   * Thread root this comment replies to; null/absent marks a thread root.
+   * A reply inherits its anchor (doc/line/side/baseVersion) from the root.
+   */
+  parentId?: string | null;
+  /** Set on a thread ROOT when the human marks the conversation resolved. */
+  resolved?: boolean;
+  /** When the thread was resolved. */
+  resolvedAt?: string;
+  /**
+   * `body` rendered to HTML. Derived at read time for display (never persisted):
+   * markdown, with raw HTML dropped so an agent cannot inject markup.
+   */
+  html?: string;
 }
 
 export const MAX_QUOTE_LEN = 2000;
@@ -99,6 +116,11 @@ export interface Review {
   /** Compiled guidance attached when approved with comments. */
   notes?: string;
   toolUseId?: string;
+  /**
+   * ISO timestamp of the newest human comment already handed to the agent by
+   * plan_review_check — the cursor that keeps the conversation from looping.
+   */
+  agentCursor?: string;
 }
 
 export interface PlanIssue {
@@ -164,6 +186,22 @@ export interface CreateCommentInput {
   body: string;
   side?: 'old' | 'new';
   baseVersion?: number;
+  /** Thread root this comment replies to (anchor inherited from the root). */
+  parentId?: string | null;
+}
+
+/** A thread root plus its replies, oldest first. */
+export interface CommentThreadView {
+  root: Comment;
+  replies: Comment[];
+}
+
+/** GET /api/reviews/:id/messages — new human messages since a cursor. */
+export interface ReviewMessagesPayload {
+  /** Newest comment createdAt included (pass back as `since`). */
+  cursor: string | null;
+  /** Human-authored thread roots/replies the agent has not seen yet. */
+  comments: Comment[];
 }
 
 export type DiffDocStatus = 'added' | 'removed' | 'modified' | 'unchanged';
