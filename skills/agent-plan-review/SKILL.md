@@ -70,14 +70,25 @@ Comments are conversation threads. The human may choose Ask agent for a question
 on a line, or reply to one of your comments; answer those with
 `plan_review_reply`. Decision-batch comments stay silent until the human decides.
 Threads are not always change requests — answer questions, explain trade-offs,
-and ask for clarification. A thread is compiled into decision feedback until the
-human marks it resolved; a resolved one drops out. Threads carry forward to the
-next version, re-anchored, so the conversation stays visible on the revised plan.
+and ask for clarification. A thread is compiled into decision feedback until it
+is resolved; a resolved one drops out. Threads carry forward to the next version,
+re-anchored, so the conversation stays visible on the revised plan.
 
 - Reply with `plan_review_reply { "reviewId": "<id>", "commentId": "<threadId>", "body": "..." }`.
 - `threadId` comes from the `newComments` entries of `plan_review_check`.
 - After replying, call `plan_review_check` again to wait for the next message or
   the decision — do not re-submit the plan to answer a question.
+- Close a thread you have actually dealt with:
+  `plan_review_resolve { "reviewId": "<id>", "commentId": "<threadId>" }`
+  (`"resolved": false` reopens it). Do this once the question is answered or the
+  change is in the plan — it stops the thread being delivered again and keeps it
+  from carrying into your next version. Never resolve a thread just to silence
+  feedback you have not addressed; the human can reopen it.
+- `plan_review_resolve` works on any review of the project, decided or still
+  pending, and needs no waiting agent. That makes it the one review tool that
+  works while you are blocked on a plan-mode `ExitPlanMode` hook: when "request
+  changes" comes back compiled with comments, clear the threads you fixed as you
+  go. `commentId` is always the thread ROOT id, never a reply id.
 
 ## Multi-document plans
 

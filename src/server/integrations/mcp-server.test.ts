@@ -122,13 +122,17 @@ async function makeHome(): Promise<string> {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'apr-mcp-'));
 }
 
-/** Flip a review's status directly in its store file — what the UI/API does. */
-function decideReview(home: string, reviewId: string, status: 'approved' | 'rejected'): void {
+/** Rewrite arbitrary fields on a review file — what the UI/API does. */
+function patchReview(home: string, reviewId: string, patch: Record<string, unknown>): void {
   const file = path.join(home, 'reviews', `${reviewId}.json`);
   const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
-  raw.status = status;
-  raw.resolvedAt = new Date().toISOString();
+  Object.assign(raw, patch);
   fs.writeFileSync(file, JSON.stringify(raw));
+}
+
+/** Flip a review's status directly in its store file — what the UI/API does. */
+function decideReview(home: string, reviewId: string, status: 'approved' | 'rejected'): void {
+  patchReview(home, reviewId, { status, resolvedAt: new Date().toISOString() });
 }
 
 /** Append a human comment to a review's version — what the UI/API does. */
@@ -187,6 +191,15 @@ beforeEach(async () => {
   home = await makeHome();
 });
 
+/** Submit a plan body against the driver's cwd; returns the reviewId. */
+async function submitBody(driver: McpDriver, markdown: string): Promise<string> {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'apr-proj-'));
+  const text = await driver.callTool('plan_review_submit', { cwd: projectDir, markdown });
+  const match = text.match(/"reviewId":\s*"([^"]+)"/);
+  assert.ok(match, `submit should return reviewId, got: ${text}`);
+  return match[1];
+}
+
 /** initialize handshake + submit a minimal plan; returns driver + reviewId. */
 async function submitPlan(driver: McpDriver): Promise<string> {
   await driver.request('initialize', {
@@ -194,14 +207,7 @@ async function submitPlan(driver: McpDriver): Promise<string> {
     capabilities: {},
     clientInfo: { name: 'test', version: '0' },
   });
-  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'apr-proj-'));
-  const text = await driver.callTool('plan_review_submit', {
-    cwd: projectDir,
-    markdown: '# Test Plan\n\nDo the thing.',
-  });
-  const match = text.match(/"reviewId":\s*"([^"]+)"/);
-  assert.ok(match, `submit should return reviewId, got: ${text}`);
-  return match[1];
+  return submitBody(driver, '# Test Plan\n\nDo the thing.');
 }
 
 test('check returns early when the review resolves — wait_seconds is a ceiling, not a sleep', async () => {
@@ -377,6 +383,117 @@ test('plan_review_reply rejects a decision-batch thread', async () => {
       readComments(home, reviewId).some((comment) => comment.author === 'agent'),
       false,
     );
+  } finally {
+    driver.close();
+  }
+});
+
+test('plan_review_resolve closes a thread and stops it being delivered', async () => {
+  const driver = new McpDriver(home);
+  try {
+    const reviewId = await submitPlan(driver);
+    const commentId = addHumanComment(home, reviewId, 'resolved before the agent ever saw it');
+
+    const resolved = await driver.callTool('plan_review_resolve', { reviewId, commentId });
+    assert.match(resolved, /"status":\s*"resolved"/);
+    assert.equal(readComments(home, reviewId).find((c) => c.id === commentId)?.resolved, true);
+
+    // Resolution, not the cursor, is what suppresses delivery here.
+    const text = await driver.callTool('plan_review_check', { reviewId, wait_seconds: 0 });
+    assert.doesNotMatch(text, /resolved before the agent ever saw it/);
+    assert.doesNotMatch(text, /newComments/);
+
+    const reopened = await driver.callTool('plan_review_resolve', {
+      reviewId,
+      commentId,
+      resolved: false,
+    });
+    assert.match(reopened, /"status":\s*"reopened"/);
+    assert.equal(readComments(home, reviewId).find((c) => c.id === commentId)?.resolved, undefined);
+
+    // Reopening makes it conversational again.
+    const after = await driver.callTool('plan_review_check', { reviewId, wait_seconds: 0 });
+    assert.match(after, /resolved before the agent ever saw it/);
+  } finally {
+    driver.close();
+  }
+});
+
+test('plan_review_resolve works on a decided hook-origin review (the plan-mode path)', async () => {
+  const driver = new McpDriver(home);
+  try {
+    const reviewId = await submitPlan(driver);
+    const commentId = addHumanComment(home, reviewId, 'fix the retry loop', 'decision');
+    // The ExitPlanMode path records origin:hook and the human may already have
+    // clicked "request changes" — resolving must not require a pending review.
+    patchReview(home, reviewId, {
+      origin: 'hook',
+      status: 'rejected',
+      resolvedAt: new Date().toISOString(),
+    });
+
+    const text = await driver.callTool('plan_review_resolve', { reviewId, commentId });
+    assert.match(text, /"status":\s*"resolved"/);
+    assert.match(text, /"version":\s*1/);
+    assert.equal(readComments(home, reviewId).find((c) => c.id === commentId)?.resolved, true);
+  } finally {
+    driver.close();
+  }
+});
+
+test('plan_review_resolve routes a thread that carried forward onto the newer version', async () => {
+  const driver = new McpDriver(home);
+  try {
+    await driver.request('initialize', {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 'test', version: '0' },
+    });
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'apr-proj-'));
+    const submit = async (markdown: string) => {
+      const text = await driver.callTool('plan_review_submit', { cwd: projectDir, markdown });
+      return text.match(/"reviewId":\s*"([^"]+)"/)![1];
+    };
+
+    const first = await submit('# Plan\n\nDo the thing.');
+    const commentId = addHumanComment(home, first, 'use exponential backoff', 'decision');
+    const second = await submit('# Plan\n\nDo the thing, with backoff.');
+    assert.notEqual(second, first);
+
+    // The thread kept its id on v2, so resolving must land there, not on the
+    // version named by the older review.
+    const text = await driver.callTool('plan_review_resolve', { reviewId: second, commentId });
+    assert.match(text, /"version":\s*2/);
+    assert.equal(readComments(home, second).find((c) => c.id === commentId)?.resolved, true);
+  } finally {
+    driver.close();
+  }
+});
+
+test('plan_review_resolve rejects a reply id, an unknown thread, and a missing commentId', async () => {
+  const driver = new McpDriver(home);
+  try {
+    const reviewId = await submitPlan(driver);
+    const rootId = addHumanComment(home, reviewId, 'root thread');
+    // A real agent reply, so the reply id we then misuse actually exists.
+    await driver.callTool('plan_review_reply', { reviewId, commentId: rootId, body: 'answered' });
+    const reply = readComments(home, reviewId).find((c) => c.author === 'agent');
+    assert.ok(reply?.id, 'agent reply should be stored');
+
+    const onReply = await driver.callTool('plan_review_resolve', {
+      reviewId,
+      commentId: reply!.id as string,
+    });
+    assert.match(onReply, /is not a thread root/);
+
+    const unknown = await driver.callTool('plan_review_resolve', {
+      reviewId,
+      commentId: 'definitely-not-a-thread',
+    });
+    assert.match(unknown, /No thread definitely-not-a-thread/);
+
+    const missing = await driver.callTool('plan_review_resolve', { reviewId });
+    assert.match(missing, /commentId is required/);
   } finally {
     driver.close();
   }

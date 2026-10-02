@@ -36,6 +36,34 @@ interface RpcRequest {
 
 const TOOLS = [
   {
+    name: 'plan_review_resolve',
+    description:
+      'Mark a human comment thread resolved once you have answered it, or reopen it with resolved:false. ' +
+      'Close a thread when it is genuinely dealt with — a question you answered, a change you made, a point ' +
+      'you explained and the human did not push back. Do NOT resolve a thread to silence feedback you have not ' +
+      'addressed; the human can always reopen it. Resolving stops the thread being delivered again and keeps it ' +
+      'from carrying into your next version. Works on any review of the project, decided or still pending, so you ' +
+      'can also clear threads while working through "request changes" before re-submitting.',
+    inputSchema: {
+      type: 'object',
+      required: ['commentId'],
+      properties: {
+        reviewId: {
+          type: 'string',
+          description: 'Review id the thread belongs to; omit to use the newest pending review in cwd.',
+        },
+        commentId: {
+          type: 'string',
+          description: 'Thread root id (the threadId from plan_review_check newComments or the review UI).',
+        },
+        resolved: {
+          type: 'boolean',
+          description: 'true (default) marks the thread resolved; false reopens it.',
+        },
+      },
+    },
+  },
+  {
     name: 'plan_review_submit',
     description:
       'Submit an implementation plan for human review. The plan opens in a browser review UI; ' +
@@ -244,6 +272,7 @@ export async function runMcpServer(): Promise<void> {
     if (name === 'plan_review_submit') return submit(store, args);
     if (name === 'plan_review_check') return check(store, args, meta);
     if (name === 'plan_review_reply') return reply(store, args);
+    if (name === 'plan_review_resolve') return resolveThread(store, args);
     if (name === 'plan_review_attach_image') return attachImage(store, args);
     return toolError(`Unknown tool: ${name}`);
   }
@@ -285,16 +314,16 @@ export async function runMcpServer(): Promise<void> {
       if (!result.isLoser && !serverWarning) openBrowser(result.reviewUrl);
       return toolText(
         serverWarning +
-        JSON.stringify(
-          {
-            reviewId: result.reviewId,
-            reviewUrl: result.reviewUrl,
-            projectKey: result.projectKey,
-            version: result.version,
-          },
-          null,
-          2,
-        ) +
+          JSON.stringify(
+            {
+              reviewId: result.reviewId,
+              reviewUrl: result.reviewUrl,
+              projectKey: result.projectKey,
+              version: result.version,
+            },
+            null,
+            2,
+          ) +
           '\n\nPlan submitted for human review. Wait for the decision with ONE long call:\n' +
           'plan_review_check { "reviewId": "<id>", "wait_seconds": 172800 }. It is a true long-poll — it returns the moment the human decides, so one call is enough.\n' +
           '- If the human chooses Ask agent on a comment thread, that same call returns early with status "pending" and newComments: answer each with plan_review_reply { "reviewId": "<id>", "commentId": "<threadId>", "body": "..." }, then call plan_review_check again. These are a conversation — not every thread needs a plan change.\n' +
@@ -415,6 +444,45 @@ export async function runMcpServer(): Promise<void> {
     );
   }
 
+  /**
+   * Close (or reopen) a thread. Deliberately accepts a review in ANY status:
+   * the useful cases are all outside a pending wait — clearing threads you just
+   * addressed while working through "request changes", or closing one you
+   * answered with plan_review_reply. It therefore never waits on a live
+   * consumer, which is what lets it work on the blocking ExitPlanMode path too.
+   */
+  async function resolveThread(store: PlanReviewStore, args: Record<string, unknown>) {
+    const commentId = typeof args.commentId === 'string' ? args.commentId.trim() : '';
+    if (!commentId) return toolError('commentId is required (the thread root id)');
+    const resolved = args.resolved !== false;
+
+    const review = await resolveReview(store, args);
+    if (!review) return toolError('No matching review found.');
+
+    // Threads live on the version they were written on, and carry-forward keeps
+    // the id — so route by comment id, not by the version on the review.
+    const version = await store.findCommentVersion(review.projectKey, commentId);
+    if (version == null) return toolError(`No thread ${commentId} in this project.`);
+    try {
+      const updated = await store.resolveComment(review.projectKey, version, commentId, resolved);
+      return toolText(
+        `${JSON.stringify({ status: resolved ? 'resolved' : 'reopened', commentId: updated.id, version })}\n\n` +
+          (resolved
+            ? 'Thread marked resolved. It will not be delivered again and will not carry into your next version. The human can still reopen it in the review UI.'
+            : 'Thread reopened. It is live again — resolve it once it is genuinely dealt with.'),
+      );
+    } catch (err) {
+      if (err instanceof ApiError) {
+        return toolError(
+          err.status === 404
+            ? `${commentId} is not a thread root — pass the root id, not a reply id.`
+            : err.message,
+        );
+      }
+      throw err;
+    }
+  }
+
   async function resolveReview(
     store: PlanReviewStore,
     args: Record<string, unknown>,
@@ -425,7 +493,7 @@ export async function runMcpServer(): Promise<void> {
     const pending = await store.listReviews({ status: 'pending' });
     const cwd = process.cwd();
     return pending.find(
-        (r) => sameProjectCwd(r.cwd, cwd) || (r.agentCwd != null && sameProjectCwd(r.agentCwd, cwd)),
+      (r) => sameProjectCwd(r.cwd, cwd) || (r.agentCwd != null && sameProjectCwd(r.agentCwd, cwd)),
     );
   }
 }

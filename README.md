@@ -86,7 +86,7 @@ Add to `~/.claude/settings.json`:
    agent-plan-review install-skill   # → ~/.pi/agent/skills/agent-plan-review/SKILL.md
    ```
 
-3. Agents use four tools:
+3. Agents use five tools:
 
    - **`plan_review_submit`** `{ cwd, markdown | plan | docs[] , images[] }` → validates and records
      through the same store, opens the browser, returns `{ reviewId, reviewUrl,
@@ -103,6 +103,12 @@ Add to `~/.claude/settings.json`:
      on their own; the steering text tells agents not to re-call or re-submit then.
    - **`plan_review_reply`** `{ reviewId, commentId, body }` → answer a human's thread while a
      review is still pending, without re-submitting the plan.
+   - **`plan_review_resolve`** `{ reviewId?, commentId, resolved? }` → mark a thread resolved
+     (or reopen it) once it is genuinely dealt with. Accepts a review in **any** status and needs
+     no waiting agent, so it also works on the blocking plan-mode `ExitPlanMode` path — clear the
+     threads you fixed as you work through "request changes". Resolving stops the thread being
+     delivered again and keeps it from carrying into the next version. `commentId` is the thread
+     root id, never a reply id.
    - **`plan_review_attach_image`** `{ path | dataBase64, name? }` → store one image and get
      back the URL/markdown to embed.
 
@@ -126,6 +132,14 @@ Immediate **Ask agent** delivery is available for pending MCP reviews. Hook/API
 reviews can add to the decision batch, but this repository does not ship an
 OpenCode conversation plugin; porting a separate OpenCode integration requires a
 persisted session binding before it can offer Ask.
+
+The reason is structural, not an oversight. The `ExitPlanMode` hook **blocks**
+the tool call until you decide, so on the plan-mode path no agent turn exists
+while the review is open — nothing could answer an Ask even if one were offered.
+`plan_review_resolve` sidesteps this: it needs no live consumer, so it works on a
+hook-origin review in any state. The converse (waking a *blocked* plan-mode agent
+to answer a question) would require the hook to give up its wait and return
+control — a real but separate change.
 
 ## Multi-document plans
 
