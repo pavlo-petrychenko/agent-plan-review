@@ -29,6 +29,37 @@ Give the human a real review surface for your plans instead of a terminal yes/no
   Use the MCP flow below only outside plan mode or when no hooks are installed.
 - **pi & any other MCP client**: use the MCP flow below.
 
+## Plan mode: the human can ask you a question mid-review
+
+The ExitPlanMode hook blocks the tool call, so if the reviewer presses **Ask
+agent** on a comment the hook gives the wait back and the plan-mode denial reason
+becomes the question. You are still in plan mode, with a turn:
+
+1. Read the question in the denial reason. Each one carries its \`threadId\`, the
+   document, the line range and the quoted text.
+2. Answer every thread:
+   \`plan_review_reply { "reviewId": "<id>", "commentId": "<threadId>", "body": "..." }\`
+   — all thread ids for one round are in the same message, and one call per
+   thread is fine.
+3. **Call \`ExitPlanMode\` again.** This is what hands control back to the human —
+   there is no background poller in plan mode, so a question you never re-present
+   is a question the human waits on forever. Your re-presentation lands on the
+   SAME review, so the thread and its answer stay together.
+
+A question is a DISCUSSION, not a change request. Answer it, explain the
+trade-off, or push back — and only revise the plan if the discussion actually
+calls for one. Questions are delivered **once**: if you ignore one and
+re-present, it will not be asked again, but the thread stays visibly open in the
+review UI, so the human can re-ask or resolve it.
+
+If Claude Code refuses \`plan_review_reply\` with "Cannot call … while in plan
+mode", allow it once — \`plan_review_reply\` is the only write the review needs in
+plan mode:
+
+\`\`\`json
+{ "permissions": { "allow": ["mcp__agent-plan-review__plan_review_reply"] } }
+\`\`\`
+
 ## When to use
 
 - You are about to implement something substantial and have (or can write) a plan.
@@ -100,10 +131,8 @@ re-anchored, so the conversation stays visible on the revised plan.
   from carrying into your next version. Never resolve a thread just to silence
   feedback you have not addressed; the human can reopen it.
 - \`plan_review_resolve\` works on any review of the project, decided or still
-  pending, and needs no waiting agent. That makes it the one review tool that
-  works while you are blocked on a plan-mode \`ExitPlanMode\` hook: when "request
-  changes" comes back compiled with comments, clear the threads you fixed as you
-  go. \`commentId\` is always the thread ROOT id, never a reply id.
+  pending, and needs no waiting agent. \`commentId\` is always the thread ROOT id,
+  never a reply id.
 
 ## Multi-document plans
 

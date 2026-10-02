@@ -17,6 +17,7 @@ export class ReviewStore {
     cwd: string;
     agentCwd?: string;
     toolUseId?: string;
+    sessionId?: string;
   }): Promise<Review> {
     const review: Review = {
       id: crypto.randomUUID(),

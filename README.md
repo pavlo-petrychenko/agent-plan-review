@@ -56,7 +56,7 @@ Add to `~/.claude/settings.json`:
 
 | Hook | Behavior |
 | --- | --- |
-| `hook-exit-plan-mode` | Blocks while you review. Approve → emits `allow` with echoed `updatedInput` (suppresses Claude Code's native confirmation) plus approve-notes as guidance. Request changes → emits `deny` carrying every comment compiled per document with line references and quotes. Validation failures deny with actionable issue lists. Hard timeout (`AGENT_PLAN_REVIEW_TIMEOUT`, default 1800 s) fails open to the native prompt. Every failure path fails open. |
+| `hook-exit-plan-mode` | Blocks while you review. Approve → emits `allow` with echoed `updatedInput` (suppresses Claude Code's native confirmation) plus approve-notes as guidance. Request changes → emits `deny` carrying every comment compiled per document with line references and quotes. **Ask agent** → also emits `deny`, carrying the questions with their `threadId`s, which returns control to Claude for a reply; it then calls `ExitPlanMode` again onto the same review. Validation failures deny with actionable issue lists. Hard timeout (`AGENT_PLAN_REVIEW_TIMEOUT`, default 1800 s) fails open to the native prompt. Every failure path fails open. |
 | `enter-plan-mode` | Injects multi-document format guidance as context only; consent to enter plan mode is untouched. |
 | `stop-gate` | If a turn would end while an MCP/API-origin review in this cwd is still pending (<5 h), reminds the agent AT MOST ONCE per review to make a single long `plan_review_check` call. Stands down entirely while a live plan-review-wake heartbeat exists. Never double-blocks; fails open. |
 
@@ -128,18 +128,37 @@ The server starts itself on first use (`EADDRINUSE` from a second instance exits
 quietly). Rejection reasons compiled for MCP/API reviews instruct re-submission via
 `plan_review_submit`; hook-origin reviews say `ExitPlanMode`.
 
-Immediate **Ask agent** delivery is available for pending MCP reviews. Hook/API
-reviews can add to the decision batch, but this repository does not ship an
-OpenCode conversation plugin; porting a separate OpenCode integration requires a
-persisted session binding before it can offer Ask.
+Immediate **Ask agent** delivery works on any review that has something reading
+it: an `mcp` review is read by `plan_review_check`, a plan-mode `hook` review by
+the blocking `ExitPlanMode` hook. An `api` review has no consumer — the browser is
+the only reader — so it may join a decision batch but never take an Ask.
 
-The reason is structural, not an oversight. The `ExitPlanMode` hook **blocks**
-the tool call until you decide, so on the plan-mode path no agent turn exists
-while the review is open — nothing could answer an Ask even if one were offered.
-`plan_review_resolve` sidesteps this: it needs no live consumer, so it works on a
-hook-origin review in any state. The converse (waking a *blocked* plan-mode agent
-to answer a question) would require the hook to give up its wait and return
-control — a real but separate change.
+The plan-mode case needed the hook to stop being a pure block. `ExitPlanMode`
+**blocks** the tool call until you decide, so there was no agent turn in which a
+reply could exist; the hook now waits for a decision **or** a question, and on a
+question returns `deny` — the same channel "request changes" already uses, which
+leaves Claude in plan mode and hands it a turn. Three consequences worth knowing:
+
+- **One live review per Claude Code session.** Reviews are keyed on `session_id`,
+  so re-presenting a plan adopts the pending review instead of minting a second
+  one. Without that, every question/answer round would strand its threads on a
+  version nobody is looking at. A revised plan still makes a new version; the
+  review is retargeted onto it, and open threads carry forward under their
+  original ids.
+- **Questions are delivered once.** `waitForDecisionOrAsk` marks the
+  conversation cursor when it hands a question over, so an ignored question is
+  not asked again. The thread stays visibly open in the UI, so the reviewer can
+  re-ask or resolve it — that is the loop-breaker.
+- **Delivery is pull-based.** A question is picked up the next time the hook
+  runs, i.e. when Claude next presents the plan. There is no process left polling
+  between calls, so the UI says so on the button.
+
+If Claude Code refuses `plan_review_reply` in plan mode ("Cannot call … while in
+plan mode"), allow it — it is the only write the review needs there:
+
+```json
+{ "permissions": { "allow": ["mcp__agent-plan-review__plan_review_reply"] } }
+```
 
 ## Multi-document plans
 

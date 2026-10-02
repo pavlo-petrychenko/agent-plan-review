@@ -28,6 +28,11 @@ export interface RecordInput {
   name?: string;
   origin: ReviewOrigin;
   toolUseId?: string;
+  /**
+   * Agent session id. With it, a hook-origin review is REUSED across
+   * presentations instead of a fresh one per call (see `recordPlan`).
+   */
+  sessionId?: string;
   /** Exactly one of: raw plan markdown (markers allowed) or structured docs. */
   markdown?: string;
   docs?: StructuredDoc[];
@@ -151,7 +156,10 @@ export async function recordPlan(
   const hash =
     kind === 'single'
       ? hashContent('single', canonicalMarkdown)
-      : hashContent('tree', [...bodies.entries()].map(([slug, markdown]) => ({ slug, markdown })));
+      : hashContent(
+          'tree',
+          [...bodies.entries()].map(([slug, markdown]) => ({ slug, markdown })),
+        );
 
   let version: number;
   let deduped = false;
@@ -162,7 +170,7 @@ export async function recordPlan(
     // fresh review request.
     version = meta.currentVersion;
     deduped = true;
-    if (kind === 'tree') manifest = await versionStore.readManifest(key, version) ?? undefined;
+    if (kind === 'tree') manifest = (await versionStore.readManifest(key, version)) ?? undefined;
   } else {
     const previousVersion = meta.currentVersion;
     version = meta.currentVersion + 1;
@@ -217,19 +225,52 @@ export async function recordPlan(
   }
 
   // --- review request ------------------------------------------------------------
-  const review = await reviews.create({
-    projectKey: key,
-    version,
-    origin: input.origin,
-    cwd,
-    // Keep the agent's raw path when it was folded, so gates and diagnostics
-    // can still match a session started inside a subdirectory.
-    agentCwd: rawCwd === cwd ? undefined : rawCwd,
-    toolUseId: input.toolUseId,
-  });
+  // One live review per plan-mode session. Answering an Ask means calling
+  // ExitPlanMode again, and each of those calls funnels through here — so a
+  // fresh review per call would strand every earlier thread (and the agent's
+  // conversation cursor) on a version nobody is looking at any more. Reusing
+  // the review also means its pending status, and the reviewer's browser tab,
+  // survive the whole discussion.
+  //
+  // Only hook origin reuses: the MCP and HTTP paths are one-shot submissions,
+  // where a second call really is a new review request. A reused review whose
+  // version moved is retargeted, because carry-forward has just copied the
+  // threads onto the new version under their original ids.
+  const reusable =
+    input.sessionId && input.origin === 'hook'
+      ? (await reviews.list({ status: 'pending', projectKey: key })).find(
+          (r) => r.origin === 'hook' && r.sessionId === input.sessionId,
+        )
+      : undefined;
+  const reusedReview = reusable != null;
+
+  const review = reusedReview
+    ? reusable.version === version
+      ? reusable
+      : ((await reviews.update(reusable.id, { version, toolUseId: input.toolUseId })) ?? reusable)
+    : await reviews.create({
+        projectKey: key,
+        version,
+        origin: input.origin,
+        cwd,
+        // Keep the agent's raw path when it was folded, so gates and diagnostics
+        // can still match a session started inside a subdirectory.
+        agentCwd: rawCwd === cwd ? undefined : rawCwd,
+        toolUseId: input.toolUseId,
+        sessionId: input.sessionId,
+      });
 
   const reviewUrl = `http://localhost:${port}/?project=${encodeURIComponent(key)}&version=${version}&review=${review.id}`;
-  return { projectKey: key, version, reviewId: review.id, reviewUrl, deduped, isLoser, manifest };
+  return {
+    projectKey: key,
+    version,
+    reviewId: review.id,
+    reviewUrl,
+    deduped,
+    isLoser,
+    reusedReview,
+    manifest,
+  };
 }
 
 // ---------------------------------------------------------------------------

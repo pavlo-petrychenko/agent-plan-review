@@ -45,9 +45,13 @@ function ReviewWorkspace() {
     }
   }, [params.project, projects.data, setParams]);
 
-  const detail = useApi(projectKey ? keys.project(projectKey) : null, () => endpoints.getProject(projectKey!));
+  const detail = useApi(projectKey ? keys.project(projectKey) : null, () =>
+    endpoints.getProject(projectKey!),
+  );
   const versions = detail.data?.versions;
-  const storage = useApi(projectKey ? keys.storage(projectKey) : null, () => endpoints.getStorage(projectKey!));
+  const storage = useApi(projectKey ? keys.storage(projectKey) : null, () =>
+    endpoints.getStorage(projectKey!),
+  );
 
   // Active version: URL param → latest.
   const version = params.version ?? versions?.[versions.length - 1]?.n ?? null;
@@ -59,9 +63,14 @@ function ReviewWorkspace() {
   }, [versions, params.version, setParams]);
 
   // --- review context ------------------------------------------------------
-  const pendingReviews = useApi(keys.reviewsPending, async () => endpoints.listReviews({ status: 'pending' }));
-  const explicitReview = useApi<Review>(params.review ? keys.review(params.review) : null, () => endpoints.getReview(params.review!));
-  const explicitReviewMatches = explicitReview.data?.projectKey === projectKey && explicitReview.data?.version === version;
+  const pendingReviews = useApi(keys.reviewsPending, async () =>
+    endpoints.listReviews({ status: 'pending' }),
+  );
+  const explicitReview = useApi<Review>(params.review ? keys.review(params.review) : null, () =>
+    endpoints.getReview(params.review!),
+  );
+  const explicitReviewMatches =
+    explicitReview.data?.projectKey === projectKey && explicitReview.data?.version === version;
   const contextualReviewId =
     (explicitReviewMatches ? explicitReview.data?.id : undefined) ??
     pendingReviews.data?.find((r) => r.projectKey === projectKey && r.version === version)?.id ??
@@ -75,20 +84,27 @@ function ReviewWorkspace() {
   useEffect(() => {
     if (params.review && explicitReview.data && !explicitReviewMatches) setParams({ review: null });
   }, [explicitReview.data, explicitReviewMatches, params.review, setParams]);
-  const reviewOnVersion = review?.status === 'pending' && review.projectKey === projectKey && review.version === version;
-  const activeMcpReview = reviewOnVersion && review.origin === 'mcp' ? review : undefined;
+  const reviewOnVersion =
+    review?.status === 'pending' && review.projectKey === projectKey && review.version === version;
+  // Two origins can carry an Ask back to the agent: an mcp review is read by
+  // plan_review_check, a hook review by the blocking ExitPlanMode hook. An api
+  // review has no consumer, so the store refuses an Ask there too.
+  const askableReview =
+    reviewOnVersion && (review.origin === 'mcp' || review.origin === 'hook') ? review : undefined;
   const deliveryUI = useMemo(
     () => ({
-      canAsk: activeMcpReview != null,
-      reviewId: activeMcpReview?.id,
+      canAsk: askableReview != null,
+      reviewId: askableReview?.id,
       decisionLabel: reviewOnVersion ? 'Add to decision' : 'Add note',
-      deliveryNote: activeMcpReview
-        ? 'Ask agent wakes the connected reviewer. If disconnected, it waits for the next check.'
+      deliveryNote: askableReview
+        ? askableReview.origin === 'hook'
+          ? 'Ask agent holds your plan-mode reviewer open so it can answer you. The question is delivered the next time it presents the plan.'
+          : 'Ask agent wakes the connected reviewer. If disconnected, it waits for the next check.'
         : reviewOnVersion
-          ? 'This review does not support immediate questions. The agent sees this when you decide.'
+          ? 'This review has no connected agent to answer questions. Comments reach it when you decide.'
           : 'This version is no longer under review.',
     }),
-    [activeMcpReview, reviewOnVersion],
+    [askableReview, reviewOnVersion],
   );
 
   // EVERY version with an open review, not just the contextual one: the header pill
@@ -104,9 +120,8 @@ function ReviewWorkspace() {
   );
 
   // --- version payload / docs ----------------------------------------------
-  const versionPayload = useApi(
-    projectKey && version ? keys.version(projectKey, version) : null,
-    () => endpoints.getVersion(projectKey!, version!),
+  const versionPayload = useApi(projectKey && version ? keys.version(projectKey, version) : null, () =>
+    endpoints.getVersion(projectKey!, version!),
   );
   const manifest = versionPayload.data?.manifest;
   const isTree = manifest != null && manifest.docs.length > 1;
@@ -131,9 +146,8 @@ function ReviewWorkspace() {
     () => endpoints.getDoc(projectKey!, version!, docSlug!),
   );
 
-  const commentsState = useApi(
-    projectKey && version ? keys.comments(projectKey, version) : null,
-    () => endpoints.getComments(projectKey!, version!),
+  const commentsState = useApi(projectKey && version ? keys.comments(projectKey, version) : null, () =>
+    endpoints.getComments(projectKey!, version!),
   );
   const allComments: Comment[] = commentsState.data?.comments ?? [];
   const feedbackComments = allComments.filter(
@@ -164,19 +178,19 @@ function ReviewWorkspace() {
       await endpoints.addComment(projectKey, version, {
         ...input,
         delivery,
-        reviewId: reviewOnVersion ? review?.id : delivery === 'ask' ? activeMcpReview?.id : undefined,
+        reviewId: reviewOnVersion ? review?.id : delivery === 'ask' ? askableReview?.id : undefined,
         doc: input.doc ?? docSlug ?? undefined,
       });
       refresh(keys.comments(projectKey, version));
-      toast(delivery === 'ask' ? 'Asked agent' : reviewOnVersion ? 'Added to decision batch' : 'Note added', 'success');
+      toast(
+        delivery === 'ask' ? 'Asked agent' : reviewOnVersion ? 'Added to decision batch' : 'Note added',
+        'success',
+      );
     },
-    [projectKey, version, docSlug, activeMcpReview?.id, review?.id, reviewOnVersion, toast],
+    [projectKey, version, docSlug, askableReview?.id, review?.id, reviewOnVersion, toast],
   );
 
-  const addDiffComment = useCallback(
-    (input: DiffCommentInput) => addComment(input),
-    [addComment],
-  );
+  const addDiffComment = useCallback((input: DiffCommentInput) => addComment(input), [addComment]);
 
   const deleteComment = useCallback(
     (id: string) => {
@@ -199,16 +213,19 @@ function ReviewWorkspace() {
         await endpoints.replyToComment(projectKey, version, rootId, {
           body,
           delivery,
-          reviewId: reviewOnVersion ? review?.id : delivery === 'ask' ? activeMcpReview?.id : undefined,
+          reviewId: reviewOnVersion ? review?.id : delivery === 'ask' ? askableReview?.id : undefined,
         });
         refresh(keys.comments(projectKey, version));
-        toast(delivery === 'ask' ? 'Asked agent' : reviewOnVersion ? 'Added to decision batch' : 'Note added', 'success');
+        toast(
+          delivery === 'ask' ? 'Asked agent' : reviewOnVersion ? 'Added to decision batch' : 'Note added',
+          'success',
+        );
       } catch (err) {
         toast(err instanceof Error ? err.message : 'Reply failed', 'error');
         throw err;
       }
     },
-    [projectKey, version, activeMcpReview?.id, review?.id, reviewOnVersion, toast],
+    [projectKey, version, askableReview?.id, review?.id, reviewOnVersion, toast],
   );
 
   const resolveComment = useCallback(
@@ -295,7 +312,9 @@ function ReviewWorkspace() {
       <Header
         projects={projects.data}
         activeProject={projectKey}
-        onProjectChange={(key) => setParams({ project: key, version: null, doc: null, review: null }, { push: true })}
+        onProjectChange={(key) =>
+          setParams({ project: key, version: null, doc: null, review: null }, { push: true })
+        }
         gistBinding={storage.data?.gist ?? null}
         onOpenGist={() => setGistOpen(true)}
         onOpenManage={() => setManageOpen(true)}
@@ -325,7 +344,9 @@ function ReviewWorkspace() {
             review={review}
             markdown={markdown}
             outlineSelection={section}
-            onOutlineSelect={(sel) => setSection(sel ? { start: sel.start, end: sel.end, label: sel.label } : null)}
+            onOutlineSelect={(sel) =>
+              setSection(sel ? { start: sel.start, end: sel.end, label: sel.label } : null)
+            }
           />
 
           <main className="flex min-w-0 flex-1 flex-col">
@@ -360,7 +381,9 @@ function ReviewWorkspace() {
               {version != null && (
                 <span className="font-mono text-[11.5px] text-ink-faint">
                   v{version}
-                  {isTree && docSlug ? ` · ${manifest?.docs.find((d) => d.slug === docSlug)?.title ?? docSlug}` : ''}
+                  {isTree && docSlug
+                    ? ` · ${manifest?.docs.find((d) => d.slug === docSlug)?.title ?? docSlug}`
+                    : ''}
                 </span>
               )}
 
@@ -443,7 +466,9 @@ function ReviewWorkspace() {
               review={review}
               markdown={markdown}
               outlineSelection={section}
-              onOutlineSelect={(sel) => setSection(sel ? { start: sel.start, end: sel.end, label: sel.label } : null)}
+              onOutlineSelect={(sel) =>
+                setSection(sel ? { start: sel.start, end: sel.end, label: sel.label } : null)
+              }
               className="min-h-0 flex-1 overflow-y-auto"
               onNavigate={() => setRailOpen(false)}
             />

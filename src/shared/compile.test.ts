@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compileRejection, compileApproval, compileIssues } from './compile.js';
+import { compileRejection, compileApproval, compileIssues, compileAsk } from './compile.js';
 import type { Comment, Manifest } from './types.js';
 
 const noResolve = () => null;
@@ -146,4 +146,63 @@ test('approval counts open threads, not raw comments', () => {
   const resolved = c({ id: 'r2', body: 'done', resolved: true });
   const out = compileApproval([root, reply, resolved], undefined, noResolve);
   assert.match(out, /APPROVED the plan with 1 comment/);
+});
+
+// --- compileAsk: delivering a question to a blocked plan-mode agent ----------
+
+test('ask carries thread ids, anchors and the reply call', () => {
+  const out = compileAsk(
+    [
+      c({
+        id: 't1',
+        doc: 'root',
+        line: 12,
+        lineEnd: 14,
+        quote: 'retry(fn, 5)',
+        body: 'why exponential backoff here?',
+        delivery: 'ask',
+      }),
+      c({ id: 't2', doc: 'risks', line: null, body: 'what about thundering herd?' }),
+    ],
+    manifest,
+    'rev-9',
+    2,
+  );
+
+  assert.match(out, /Ask agent on your plan review \(v2\)/);
+  assert.match(out, /DISCUSSION/, 'must not read as a change request');
+  // Grouped by document, with the handle the reply tool needs.
+  assert.match(out, /## Document: Plan/);
+  assert.match(out, /## Document: Risks/);
+  assert.match(out, /\[lines 12-14\] "retry\(fn, 5\)" → why exponential backoff here\?/);
+  assert.match(out, /threadId: t1/);
+  assert.match(out, /threadId: t2/);
+  assert.match(out, /"reviewId": "rev-9"/);
+  assert.match(out, /ExitPlanMode/, 'the plan goes back for a decision, not a resubmit');
+  assert.ok(out.indexOf('## Document: Plan') < out.indexOf('## Document: Risks'), 'doc order');
+});
+
+test('ask shows the newest message of a thread and drops resolved ones', () => {
+  const out = compileAsk(
+    [
+      c({ id: 't1', body: 'first question', delivery: 'ask' }),
+      c({ id: 'r1', parentId: 't1', body: 'follow-up: and why 5 attempts?', delivery: 'ask' }),
+      c({ id: 't2', body: 'settled already', delivery: 'ask', resolved: true }),
+    ],
+    undefined,
+    'rev-1',
+    1,
+  );
+
+  assert.match(out, /and why 5 attempts\?/, 'the follow-up supersedes the original');
+  assert.doesNotMatch(out, /first question/);
+  assert.doesNotMatch(out, /settled already/, 'a resolved thread drops out');
+  assert.equal(out.match(/threadId:/g)?.length, 1);
+});
+
+test('ask degrades gracefully with no manifest or anchors', () => {
+  const out = compileAsk([c({ id: 't1', body: 'general question', delivery: 'ask' })], undefined, 'r', 1);
+  assert.match(out, /## Comments/, 'single-doc header, not a bare doc slug');
+  assert.match(out, /- general question/, 'no empty line label when the anchor is general');
+  assert.match(out, /threadId: t1/);
 });

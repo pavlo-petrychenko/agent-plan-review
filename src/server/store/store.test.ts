@@ -616,3 +616,160 @@ test('plan images are stored, image:NAME is rewritten, and a dangling ref fails 
     },
   );
 });
+
+// ---------------------------------------------------------------------------
+// plan-mode conversation: one review per session, Asks answered across rounds
+// ---------------------------------------------------------------------------
+
+test('a hook session reuses its pending review across presentations', async () => {
+  const store = makeStore();
+  const cwd = makeDir('apr-session-');
+
+  const first = await store.recordPlan({
+    cwd,
+    origin: 'hook',
+    sessionId: 'sess-1',
+    toolUseId: 'tu-1',
+    markdown: '# Plan\n\nStep one.',
+  });
+  assert.equal(first.reusedReview, false, 'nothing to reuse on the first call');
+
+  // The agent answers a question by presenting the plan again, unchanged.
+  const again = await store.recordPlan({
+    cwd,
+    origin: 'hook',
+    sessionId: 'sess-1',
+    toolUseId: 'tu-2',
+    markdown: '# Plan\n\nStep one.',
+  });
+  assert.equal(again.reusedReview, true);
+  assert.equal(again.reviewId, first.reviewId, 'same review, so its threads stay live');
+  assert.equal(again.version, first.version, 'byte-identical plan reuses the version');
+  assert.equal(
+    (await store.listReviews({ status: 'pending', projectKey: first.projectKey })).length,
+    1,
+    'no orphan pending review is left behind',
+  );
+
+  // A revised plan makes a new version but STILL the same review, retargeted.
+  const revised = await store.recordPlan({
+    cwd,
+    origin: 'hook',
+    sessionId: 'sess-1',
+    toolUseId: 'tu-3',
+    markdown: '# Plan\n\nStep one, now with backoff.',
+  });
+  assert.equal(revised.reviewId, first.reviewId);
+  assert.equal(revised.version, 2);
+  assert.equal((await store.getReview(first.reviewId))?.version, 2, 'review follows the plan');
+
+  // A different session is a different review; MCP submissions never reuse.
+  const other = await store.recordPlan({
+    cwd,
+    origin: 'hook',
+    sessionId: 'sess-2',
+    markdown: '# Plan\n\nStep one, now with backoff.',
+  });
+  assert.notEqual(other.reviewId, first.reviewId);
+  const mcp = await store.recordPlan({
+    cwd,
+    origin: 'mcp',
+    sessionId: 'sess-1',
+    markdown: '# Plan\n\nStep one, now with backoff.',
+  });
+  assert.notEqual(mcp.reviewId, first.reviewId, 'a second MCP submission is a new review');
+});
+
+test('an Ask on a plan-mode review survives a revised plan and is answered once', async () => {
+  const store = makeStore();
+  const cwd = makeDir('apr-ask-');
+  const first = await store.recordPlan({
+    cwd,
+    origin: 'hook',
+    sessionId: 'sess-1',
+    toolUseId: 'tu-1',
+    markdown: '# Plan\n\nStep one.\n',
+  });
+
+  const asked = await store.addComment(first.projectKey, 1, {
+    body: 'why exponential backoff here?',
+    delivery: 'ask',
+    reviewId: first.reviewId,
+    doc: 'root',
+  });
+  assert.equal(asked.wakeReviewId, first.reviewId, 'the Ask targets this review');
+
+  const delivered = await store.getReviewMessages(first.reviewId);
+  assert.equal(delivered.comments.length, 1);
+
+  // The agent revises in the light of the question; the thread must follow.
+  const revised = await store.recordPlan({
+    cwd,
+    origin: 'hook',
+    sessionId: 'sess-1',
+    toolUseId: 'tu-2',
+    markdown: '# Plan\n\nStep one, with exponential backoff.\n',
+  });
+  assert.equal(revised.reviewId, first.reviewId);
+
+  const stillOpen = await store.getReviewMessages(first.reviewId);
+  assert.equal(
+    stillOpen.comments.length,
+    1,
+    'the Ask carried onto v2 and is still deliverable on the same review',
+  );
+
+  const { comment: reply } = await store.replyToReview(
+    first.reviewId,
+    asked.id,
+    'because retries were hammering the API',
+  );
+  assert.equal(reply.author, 'agent');
+  assert.equal(reply.parentId, asked.id);
+  assert.equal(reply.doc, 'root', 'the reply anchors where the thread now lives');
+
+  // Delivering it marks the cursor, so the next round does not re-ask it.
+  await store.markAgentCursor(first.reviewId, stillOpen.cursor);
+  assert.equal((await store.getReviewMessages(first.reviewId)).comments.length, 0);
+
+  // A second question after the cursor IS delivered.
+  const second = await store.addComment(first.projectKey, 2, {
+    body: 'and the cap?',
+    delivery: 'ask',
+    reviewId: first.reviewId,
+    doc: 'root',
+  });
+  const next = await store.getReviewMessages(first.reviewId);
+  assert.equal(next.comments.length, 1);
+  assert.equal(next.comments[0].id, second.id);
+});
+
+test('an Ask needs a consumer: api reviews still may not take one', async () => {
+  const store = makeStore();
+  const rec = await store.recordPlan({
+    cwd: makeDir('apr-api-'),
+    origin: 'api',
+    markdown: '# Plan\n\nbody\n',
+  });
+  await assert.rejects(
+    () =>
+      store.addComment(rec.projectKey, rec.version, {
+        body: 'question',
+        delivery: 'ask',
+        reviewId: rec.reviewId,
+        doc: 'root',
+      }),
+    /Ask is only available for MCP and plan-mode hook reviews/,
+  );
+  // …but the decision batch still works there. A human decision comment is
+  // deliberately NOT stamped with a review id — it belongs to whichever decision
+  // happens, not to this one — so it never blocks an Ask from being offered.
+  const batch = await store.addComment(rec.projectKey, rec.version, {
+    body: 'note',
+    delivery: 'decision',
+    reviewId: rec.reviewId,
+    doc: 'root',
+  });
+  assert.equal(batch.decisionReviewId, undefined);
+  assert.equal(batch.delivery, 'decision');
+});

@@ -178,8 +178,13 @@ export class PlanReviewStore {
         );
       }
       if (review.status !== 'pending') throw conflict({ error: `Review is already ${review.status}` });
-      if (delivery === 'ask' && review.origin !== 'mcp') {
-        throw badRequest('Ask is only available for MCP reviews');
+      // An Ask needs someone who will actually deliver it. Hook reviews are read
+      // by the blocking ExitPlanMode hook, which returns control on the question
+      // so the agent gets a turn to reply; mcp reviews are read by
+      // plan_review_check. An api review has neither — the browser is the only
+      // consumer — so it may still join a decision batch but never an Ask.
+      if (delivery === 'ask' && review.origin !== 'mcp' && review.origin !== 'hook') {
+        throw badRequest('Ask is only available for MCP and plan-mode hook reviews');
       }
     }
     const manifest = await this.versions.readManifest(key, n);

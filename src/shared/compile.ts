@@ -5,6 +5,9 @@
  *  - reject: per-document sections in reading order, line comments sorted by
  *    line with `[lines X-Y] "snippet" → body` formatting, then general
  *    comments. Always ends with an instruction to re-present.
+ *  - ask: targeted human questions on a still-pending review, grouped into
+ *    threads so the agent can answer each one by id. Ends by handing the plan
+ *    back for a decision.
  *  - approve: notes only when comments exist ("approved with comments").
  *  - issues: compiled validation failures for deny reasons.
  */
@@ -66,7 +69,9 @@ function formatLineComment(c: Comment, resolve: LineSliceResolver): string {
   const quoteSource =
     c.quote?.trim() ||
     (c.line != null
-      ? snippet(resolve(c.doc, c.line, c.lineEnd ?? c.line, c.side === 'old' ? c.baseVersion : undefined) ?? '')
+      ? snippet(
+          resolve(c.doc, c.line, c.lineEnd ?? c.line, c.side === 'old' ? c.baseVersion : undefined) ?? '',
+        )
       : '');
   const quoted = quoteSource ? ` "${quoteSource}"` : '';
   return `- ${label}${quoted} → ${c.body.trim()}`;
@@ -78,6 +83,59 @@ function bySideThenLine(a: Comment, b: Comment): number {
   return side(a) - side(b) || a.line! - b.line! || (a.lineEnd ?? a.line)! - (b.lineEnd ?? b.line)!;
 }
 
+/**
+ * Compile targeted human questions into the denial reason that returns control
+ * to a plan-mode agent (the ExitPlanMode hook blocks the tool call, so an Ask
+ * has to be delivered by giving the agent a turn).
+ *
+ * Every question is printed with its THREAD id — that is the handle
+ * plan_review_reply takes — and the closing instruction is to present the plan
+ * again, not to re-submit a revision. A discussion is not a change request.
+ */
+export function compileAsk(
+  comments: Comment[],
+  manifest: Manifest | undefined,
+  reviewId: string,
+  version: number,
+): string {
+  const threads = groupThreads(comments).filter(isOpenThread);
+  const sections: string[] = [
+    `The human chose Ask agent on your plan review (v${version}). This is a DISCUSSION, ` +
+      `not a change request.`,
+  ];
+
+  // Threads inherit the root's anchor, so the ROOT is what orders the sections.
+  for (const slug of orderedDocs(
+    threads.map((t) => t.root),
+    manifest,
+  )) {
+    const inDoc = threads.filter((t) => t.root.doc === slug);
+    if (inDoc.length === 0) continue;
+    sections.push(sectionHeader(manifest, slug));
+    for (const thread of inDoc) {
+      // Newest message wins: a follow-up supersedes the original question.
+      const latest = actionableMessage(thread);
+      const label = lineLabel(latest);
+      const quoted = latest.quote?.trim() ? ` "${snippet(latest.quote)}"` : '';
+      // A general comment has no anchor, so there is nothing for an arrow to
+      // introduce — emitting "-  → body" reads like a formatting bug.
+      const where = `${label}${quoted}`;
+      sections.push(
+        `- ${where ? `${where} → ` : ''}${latest.body.trim()}\n` + `  threadId: ${thread.root.id}`,
+      );
+    }
+  }
+
+  sections.push(
+    `Answer every thread above with\n` +
+      `  plan_review_reply { "reviewId": "${reviewId}", "commentId": "<threadId>", "body": "..." }\n` +
+      `then present the plan again with ExitPlanMode so the human can decide. Not every thread ` +
+      `needs a plan change — answer, explain the trade-off, or push back. Revise and re-present ` +
+      `only if the discussion actually calls for one.`,
+  );
+  return sections.join('\n\n');
+}
+
 export type ResubmitChannel = 'ExitPlanMode' | 'plan_review_submit';
 
 /**
@@ -86,9 +144,7 @@ export type ResubmitChannel = 'ExitPlanMode' | 'plan_review_submit';
  * are conversation, never feedback, and resolved threads drop out entirely.
  */
 export function actionableComments(comments: Comment[]): Comment[] {
-  return groupThreads(comments)
-    .filter(isOpenThread)
-    .map(actionableMessage);
+  return groupThreads(comments).filter(isOpenThread).map(actionableMessage);
 }
 
 /**
@@ -118,9 +174,7 @@ export function compileRejection(
   ];
   for (const slug of orderedDocs(actionable, manifest)) {
     const docComments = actionable.filter((c) => c.doc === slug);
-    const line = docComments
-      .filter((c) => c.line != null)
-      .sort(bySideThenLine);
+    const line = docComments.filter((c) => c.line != null).sort(bySideThenLine);
     const general = docComments.filter((c) => c.line == null);
     sections.push(sectionHeader(manifest, slug));
     for (const c of line) sections.push(formatLineComment(c, resolve));
@@ -148,9 +202,7 @@ export function compileApproval(
   ];
   for (const slug of orderedDocs(actionable, manifest)) {
     const docComments = actionable.filter((c) => c.doc === slug);
-    const line = docComments
-      .filter((c) => c.line != null)
-      .sort(bySideThenLine);
+    const line = docComments.filter((c) => c.line != null).sort(bySideThenLine);
     const general = docComments.filter((c) => c.line == null);
     sections.push(sectionHeader(manifest, slug, 'Notes'));
     for (const c of line) sections.push(formatLineComment(c, resolve));

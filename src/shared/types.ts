@@ -122,6 +122,13 @@ export interface Review {
   notes?: string;
   toolUseId?: string;
   /**
+   * Claude Code session this review belongs to (hook origin only). One live
+   * review per session: answering an Ask means calling ExitPlanMode again, and
+   * every round must land on the SAME review or its threads and conversation
+   * cursor are orphaned on the previous version.
+   */
+  sessionId?: string;
+  /**
    * ISO timestamp of the newest targeted Ask already handed to the agent by
    * plan_review_check — the cursor that keeps the conversation from looping.
    */
@@ -255,6 +262,12 @@ export interface RecordPlanResult {
   deduped: boolean;
   /** True when a duplicate tool_use_id lost the create race and must not open a tab. */
   isLoser?: boolean;
+  /**
+   * True when an existing pending review was adopted instead of a new one
+   * (one live review per plan-mode session). The caller should treat this as
+   * "the review you were already showing", not a fresh request.
+   */
+  reusedReview: boolean;
 }
 
 export interface DecisionResponse {
