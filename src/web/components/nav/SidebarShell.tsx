@@ -90,7 +90,7 @@ export function Sidebar({
           <EmptyState
             icon={<IconFolder className="h-7 w-7" />}
             title="All versions deleted"
-            body="New plans from Claude will start this project over at v1."
+            body="New plans from the agent will start this project over at v1."
           />
         </div>
       )}

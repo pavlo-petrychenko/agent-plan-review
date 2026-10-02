@@ -11,7 +11,13 @@
  * agents toward ONE long call instead of a polling loop.
  */
 
-import { APP_NAME, APP_VERSION, checkProgressIntervalMs, loadConfig, maxCheckWaitSeconds } from '../config.js';
+import {
+  APP_NAME,
+  APP_VERSION,
+  checkProgressIntervalMs,
+  loadConfig,
+  maxCheckWaitSeconds,
+} from '../config.js';
 import { PlanReviewStore } from '../store/store.js';
 import { storePlanImage } from '../store/images.js';
 import { ApiError, PlanValidationError } from '../util/errors.js';
@@ -39,7 +45,11 @@ const TOOLS = [
       type: 'object',
       required: ['cwd'],
       properties: {
-        cwd: { type: 'string', description: 'Absolute path of the repo/worktree ROOT the plan belongs to (its git toplevel). Subdirectories are folded into the containing project automatically.' },
+        cwd: {
+          type: 'string',
+          description:
+            'Absolute path of the repo/worktree ROOT the plan belongs to (its git toplevel). Subdirectories are folded into the containing project automatically.',
+        },
         name: { type: 'string', description: 'Optional display name for the project.' },
         markdown: { type: 'string', description: 'Single-document plan markdown.' },
         plan: { type: 'string', description: 'Raw plan string (markers allowed); treated like markdown.' },
@@ -60,16 +70,19 @@ const TOOLS = [
         images: {
           type: 'array',
           description:
-            'Images to embed in the plan. Reference each one from the markdown as ![alt](image:<name>) and it is '
-            + 'rewritten to a served URL. Screenshots are stored content-addressed, so re-submitting the same file '
-            + 'costs nothing.',
+            'Images to embed in the plan. Reference each one from the markdown as ![alt](image:<name>) and it is ' +
+            'rewritten to a served URL. Screenshots are stored content-addressed, so re-submitting the same file ' +
+            'costs nothing.',
           items: {
             type: 'object',
             required: ['name'],
             properties: {
               name: { type: 'string', description: 'Short handle used as image:<name> in the markdown.' },
               path: { type: 'string', description: 'Path to the image file (absolute, or relative to cwd).' },
-              dataBase64: { type: 'string', description: 'Or the bytes inline as base64 (a data: URL is accepted).' },
+              dataBase64: {
+                type: 'string',
+                description: 'Or the bytes inline as base64 (a data: URL is accepted).',
+              },
             },
           },
         },
@@ -79,15 +92,18 @@ const TOOLS = [
   {
     name: 'plan_review_attach_image',
     description:
-      'Store one image and get back a URL to embed in a plan (useful when the plan is composed after the '
-      + 'screenshot was taken). Equivalent to passing images[] to plan_review_submit.',
+      'Store one image and get back a URL to embed in a plan (useful when the plan is composed after the ' +
+      'screenshot was taken). Equivalent to passing images[] to plan_review_submit.',
     inputSchema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Path to the image file (absolute, or relative to cwd).' },
         dataBase64: { type: 'string', description: 'Or the bytes inline as base64.' },
         name: { type: 'string', description: 'Optional handle, returned for convenience.' },
-        cwd: { type: 'string', description: 'Base directory for a relative path. Defaults to the MCP server cwd.' },
+        cwd: {
+          type: 'string',
+          description: 'Base directory for a relative path. Defaults to the MCP server cwd.',
+        },
       },
     },
   },
@@ -96,33 +112,49 @@ const TOOLS = [
     description:
       'Wait for the human decision on a submitted plan. TRUE LONG-POLL: returns the moment the ' +
       'decision lands or wait_seconds elapses, whichever is first — so ONE long call beats a loop ' +
-      'of short calls (recommended: wait_seconds=172800). It ALSO returns early when the human ' +
-      'writes to a comment thread: the result then has status "pending" with newComments — answer ' +
-      'each via plan_review_reply (commentId = threadId), then call plan_review_check again. If your ' +
+      'of short calls (recommended: wait_seconds=172800). It ALSO returns early only when the human ' +
+      'chooses Ask agent on a comment thread: the result then has status "pending" with newComments — ' +
+      'answer each via plan_review_reply (commentId = threadId), then call plan_review_check again. ' +
+      'Comments added to the decision batch stay silent until approval or requested changes. If your ' +
       'harness moves the call to the background (Claude Code auto-backgrounds after ~2 min): do NOT ' +
       'call again and do NOT re-submit; the result arrives automatically when the human decides.',
     inputSchema: {
       type: 'object',
       properties: {
-        reviewId: { type: 'string', description: 'Review id from plan_review_submit. Omit to use the newest pending review in cwd.' },
-        wait_seconds: { type: 'number', description: 'Max seconds to long-poll (default 0; ceiling AGENT_PLAN_REVIEW_MAX_WAIT, default 172800 = 48 h).' },
-        since: { type: 'string', description: 'Optional cursor from a previous check; omit — the server tracks what you have already seen.' },
+        reviewId: {
+          type: 'string',
+          description: 'Review id from plan_review_submit. Omit to use the newest pending review in cwd.',
+        },
+        wait_seconds: {
+          type: 'number',
+          description:
+            'Max seconds to long-poll (default 0; ceiling AGENT_PLAN_REVIEW_MAX_WAIT, default 172800 = 48 h).',
+        },
+        since: {
+          type: 'string',
+          description:
+            'Optional cursor from a previous check; omit — the server tracks what you have already seen.',
+        },
       },
     },
   },
   {
     name: 'plan_review_reply',
     description:
-      'Reply to a human comment thread on a pending plan review. Use the threadId from ' +
-      'plan_review_check newComments. Threads are a conversation: answer questions, explain ' +
-      'trade-offs, ask for clarification. Not every thread needs a plan change. After replying, ' +
-      'call plan_review_check again to keep waiting for the decision or the next message.',
+      'Reply to an Ask agent comment thread on a pending plan review. Use the threadId from ' +
+      'plan_review_check newComments. Decision-batch threads are not conversational until the ' +
+      'human decides. Answer questions, explain trade-offs, and ask for clarification. Not every ' +
+      'thread needs a plan change. After replying, call plan_review_check again to keep waiting for ' +
+      'the decision or the next Ask.',
     inputSchema: {
       type: 'object',
       required: ['commentId', 'body'],
       properties: {
         reviewId: { type: 'string', description: 'Review id; omit to use the newest pending review in cwd.' },
-        commentId: { type: 'string', description: 'threadId of the thread to reply to (from plan_review_check newComments).' },
+        commentId: {
+          type: 'string',
+          description: 'threadId of the thread to reply to (from plan_review_check newComments).',
+        },
         body: { type: 'string', description: 'Your reply text.' },
       },
     },
@@ -142,7 +174,9 @@ export async function runMcpServer(): Promise<void> {
       return {};
     }
     if (msg.method === 'initialize') {
-      const requested = String((msg.params as { protocolVersion?: string } | undefined)?.protocolVersion ?? '');
+      const requested = String(
+        (msg.params as { protocolVersion?: string } | undefined)?.protocolVersion ?? '',
+      );
       return {
         // Echo the client's requested version when present — maximizes
         // compatibility across MCP clients (pi adapter, Claude Desktop, …).
@@ -201,7 +235,12 @@ export async function runMcpServer(): Promise<void> {
     if (closed) process.exit(0);
   }, 1000).unref();
 
-  async function callTool(store: PlanReviewStore, name: string, args: Record<string, unknown>, meta?: Record<string, unknown>): Promise<unknown> {
+  async function callTool(
+    store: PlanReviewStore,
+    name: string,
+    args: Record<string, unknown>,
+    meta?: Record<string, unknown>,
+  ): Promise<unknown> {
     if (name === 'plan_review_submit') return submit(store, args);
     if (name === 'plan_review_check') return check(store, args, meta);
     if (name === 'plan_review_reply') return reply(store, args);
@@ -258,13 +297,16 @@ export async function runMcpServer(): Promise<void> {
         ) +
           '\n\nPlan submitted for human review. Wait for the decision with ONE long call:\n' +
           'plan_review_check { "reviewId": "<id>", "wait_seconds": 172800 }. It is a true long-poll — it returns the moment the human decides, so one call is enough.\n' +
-          '- If the human writes to a comment thread, that same call returns early with status "pending" and newComments: answer each with plan_review_reply { "reviewId": "<id>", "commentId": "<threadId>", "body": "..." }, then call plan_review_check again. These are a conversation — not every thread needs a plan change.\n' +
+          '- If the human chooses Ask agent on a comment thread, that same call returns early with status "pending" and newComments: answer each with plan_review_reply { "reviewId": "<id>", "commentId": "<threadId>", "body": "..." }, then call plan_review_check again. These are a conversation — not every thread needs a plan change.\n' +
+          '- Comments the human adds to the decision batch do not wake you. They arrive only in the final approved notes or requested-changes feedback.\n' +
           '- If your harness moves that call to the background (e.g. Claude Code after ~2 min), do NOT re-call and do NOT re-submit; you will be woken with the result.\n' +
           '- Never loop short waits; never re-submit while a review is pending.',
       );
     } catch (err) {
       if (err instanceof PlanValidationError) {
-        return toolText(`The plan failed validation and was NOT recorded:\n${compileIssues(err.issues, 'plan_review_submit')}`);
+        return toolText(
+          `The plan failed validation and was NOT recorded:\n${compileIssues(err.issues, 'plan_review_submit')}`,
+        );
       }
       if (err instanceof ApiError) return toolText(`The plan was NOT recorded: ${err.message}`);
       throw err;
@@ -291,12 +333,19 @@ export async function runMcpServer(): Promise<void> {
     }
   }
 
-  async function check(store: PlanReviewStore, args: Record<string, unknown>, meta?: Record<string, unknown>) {
+  async function check(
+    store: PlanReviewStore,
+    args: Record<string, unknown>,
+    meta?: Record<string, unknown>,
+  ) {
     const wait = Math.min(Math.max(Number(args.wait_seconds ?? 0) || 0, 0), maxCheckWaitSeconds());
     const since = typeof args.since === 'string' && args.since ? args.since : undefined;
     let review = await resolveReview(store, args);
     if (!review) {
-      return toolText(JSON.stringify({ status: 'not_found' }) + '\n\nNo matching review found. Re-submit with plan_review_submit.');
+      return toolText(
+        JSON.stringify({ status: 'not_found' }) +
+          '\n\nNo matching review found. Re-submit with plan_review_submit.',
+      );
     }
 
     // Periodic progress notifications keep client idle-timeouts from reaping a
@@ -308,12 +357,7 @@ export async function runMcpServer(): Promise<void> {
     const started = Date.now();
     const deadline = started + wait * 1000;
     let lastProgress = 0;
-    while (review.status === 'pending' && Date.now() < deadline) {
-      await sleep(300);
-      review = (await store.getReview(review.id)) ?? review;
-      if (review.status !== 'pending') break;
-
-      // The human wrote to a thread: hand it over so the agent can answer.
+    while (review.status === 'pending') {
       const messages = await store.getReviewMessages(review.id, since);
       if (messages.comments.length > 0) {
         await store.markAgentCursor(review.id, messages.cursor);
@@ -333,6 +377,9 @@ export async function runMcpServer(): Promise<void> {
           },
         });
       }
+      if (now >= deadline) break;
+      await sleep(300);
+      review = (await store.getReview(review.id)) ?? review;
     }
 
     if (review.status === 'pending') {
@@ -354,34 +401,32 @@ export async function runMcpServer(): Promise<void> {
   async function reply(store: PlanReviewStore, args: Record<string, unknown>) {
     const commentId = typeof args.commentId === 'string' ? args.commentId : '';
     const body = typeof args.body === 'string' ? args.body.trim() : '';
-    if (!commentId) return toolError('commentId is required (the threadId from plan_review_check newComments)');
+    if (!commentId)
+      return toolError('commentId is required (the threadId from plan_review_check newComments)');
     if (!body) return toolError('body is required');
 
     const review = await resolveReview(store, args);
     if (!review) return toolError('No matching pending review found.');
-    const { comment: created, version } = await store.replyToThread(
-      review.projectKey,
-      review.version,
-      commentId,
-      body,
-    );
+    const target = await store.replyToReview(review.id, commentId, body);
+    const created = target.comment;
     return toolText(
-      `${JSON.stringify({ status: 'replied', commentId: created.parentId ?? created.id, version })}\n\n` +
-        'Reply posted. Call plan_review_check again to keep waiting for the decision or the next human message.',
+      `${JSON.stringify({ status: 'replied', commentId: created.parentId ?? created.id, version: target.version })}\n\n` +
+        'Reply posted. Call plan_review_check again to keep waiting for the decision or the next Ask.',
     );
   }
 
-  async function resolveReview(store: PlanReviewStore, args: Record<string, unknown>): Promise<Review | undefined> {
+  async function resolveReview(
+    store: PlanReviewStore,
+    args: Record<string, unknown>,
+  ): Promise<Review | undefined> {
     if (typeof args.reviewId === 'string' && args.reviewId) {
       return (await store.getReview(args.reviewId)) ?? undefined;
     }
     const pending = await store.listReviews({ status: 'pending' });
     const cwd = process.cwd();
-    const match =
-      pending.find(
+    return pending.find(
         (r) => sameProjectCwd(r.cwd, cwd) || (r.agentCwd != null && sameProjectCwd(r.agentCwd, cwd)),
-      ) ?? pending[0];
-    return match;
+    );
   }
 }
 
@@ -400,13 +445,16 @@ function pendingWithComments(review: Review, comments: Comment[], cursor: string
     lineEnd: c.lineEnd,
     quote: c.quote,
     body: c.body,
+    delivery: 'ask',
     createdAt: c.createdAt,
   }));
   return toolText(
     `${JSON.stringify({ status: 'pending', reviewId: review.id, cursor, newComments: messages }, null, 2)}\n\n` +
-      'The human wrote to you. This is a DISCUSSION thread — answer with plan_review_reply ' +
-      '{ "reviewId": "' + review.id + '", "commentId": "<threadId>", "body": "..." } for each. ' +
-      'Then call plan_review_check again to keep waiting for the decision or the next message. ' +
+      'The human chose Ask agent. This is a DISCUSSION thread — answer with plan_review_reply ' +
+      '{ "reviewId": "' +
+      review.id +
+      '", "commentId": "<threadId>", "body": "..." } for each. ' +
+      'Then call plan_review_check again to keep waiting for the decision or the next Ask. ' +
       'Only revise and re-submit the plan if the discussion calls for a change.',
   );
 }

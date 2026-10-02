@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { Comment, GistBinding } from '../shared/types.js';
+import type { Comment, CreateCommentInput, GistBinding, Review } from '../shared/types.js';
 import { actionableComments } from '../shared/compile.js';
-import { invalidate, useApi } from './api/cache.js';
+import { refresh, useApi } from './api/cache.js';
 import { endpoints, keys } from './api/endpoints.js';
 import { useParams, useSetParams } from './state/url.js';
 import { ThemeProvider } from './state/theme.js';
@@ -60,11 +60,36 @@ function ReviewWorkspace() {
 
   // --- review context ------------------------------------------------------
   const pendingReviews = useApi(keys.reviewsPending, async () => endpoints.listReviews({ status: 'pending' }));
+  const explicitReview = useApi<Review>(params.review ? keys.review(params.review) : null, () => endpoints.getReview(params.review!));
+  const explicitReviewMatches = explicitReview.data?.projectKey === projectKey && explicitReview.data?.version === version;
   const contextualReviewId =
-    params.review ??
+    (explicitReviewMatches ? explicitReview.data?.id : undefined) ??
     pendingReviews.data?.find((r) => r.projectKey === projectKey && r.version === version)?.id ??
     null;
-  const { review } = useReviewPoll(contextualReviewId);
+  // A pending review's comments are live data too: an agent reply arrives there,
+  // not in the review record. Ride the review poll so the thread updates in step.
+  const pollComments = useCallback(() => {
+    if (projectKey && version) refresh(keys.comments(projectKey, version));
+  }, [projectKey, version]);
+  const { review } = useReviewPoll(contextualReviewId, pollComments);
+  useEffect(() => {
+    if (params.review && explicitReview.data && !explicitReviewMatches) setParams({ review: null });
+  }, [explicitReview.data, explicitReviewMatches, params.review, setParams]);
+  const reviewOnVersion = review?.status === 'pending' && review.projectKey === projectKey && review.version === version;
+  const activeMcpReview = reviewOnVersion && review.origin === 'mcp' ? review : undefined;
+  const deliveryUI = useMemo(
+    () => ({
+      canAsk: activeMcpReview != null,
+      reviewId: activeMcpReview?.id,
+      decisionLabel: reviewOnVersion ? 'Add to decision' : 'Add note',
+      deliveryNote: activeMcpReview
+        ? 'Ask agent wakes the connected reviewer. If disconnected, it waits for the next check.'
+        : reviewOnVersion
+          ? 'This review does not support immediate questions. The agent sees this when you decide.'
+          : 'This version is no longer under review.',
+    }),
+    [activeMcpReview, reviewOnVersion],
+  );
 
   // EVERY version with an open review, not just the contextual one: the header pill
   // counts them all, while the rail used to mark only the review in the URL.
@@ -111,11 +136,15 @@ function ReviewWorkspace() {
     () => endpoints.getComments(projectKey!, version!),
   );
   const allComments: Comment[] = commentsState.data?.comments ?? [];
-  // What the feedback compiler will actually send: one entry per OPEN thread.
-  // The raw message count is still surfaced, but the promise must not overstate
-  // itself by counting agent replies or threads the human already resolved.
-  const actionable = actionableComments(allComments);
+  const feedbackComments = allComments.filter(
+    (comment) => comment.decisionReviewId == null || comment.decisionReviewId === review?.id,
+  );
+  const actionable = actionableComments(feedbackComments);
   const docComments = isTree ? allComments.filter((c) => c.doc === docSlug) : allComments;
+
+  useEffect(() => {
+    if (review?.status === 'pending') refresh(keys.comments(review.projectKey, review.version));
+  }, [review]);
 
   // --- outline section filter ----------------------------------------------
   const [section, setSection] = useState<SectionFilter | null>(null);
@@ -129,21 +158,19 @@ function ReviewWorkspace() {
 
   // --- mutations -----------------------------------------------------------
   const addComment = useCallback(
-    async (input: {
-      body: string;
-      quote: string | null;
-      line: number | null;
-      lineEnd: number | null;
-      doc?: string;
-      side?: 'old' | 'new';
-      baseVersion?: number;
-    }) => {
+    async (input: CreateCommentInput) => {
       if (!projectKey || !version) return;
-      await endpoints.addComment(projectKey, version, { ...input, doc: input.doc ?? docSlug ?? undefined });
-      invalidate(`comments:${projectKey}:${version}`);
-      toast('Comment added', 'success');
+      const delivery = input.delivery ?? 'decision';
+      await endpoints.addComment(projectKey, version, {
+        ...input,
+        delivery,
+        reviewId: reviewOnVersion ? review?.id : delivery === 'ask' ? activeMcpReview?.id : undefined,
+        doc: input.doc ?? docSlug ?? undefined,
+      });
+      refresh(keys.comments(projectKey, version));
+      toast(delivery === 'ask' ? 'Asked agent' : reviewOnVersion ? 'Added to decision batch' : 'Note added', 'success');
     },
-    [projectKey, version, docSlug, toast],
+    [projectKey, version, docSlug, activeMcpReview?.id, review?.id, reviewOnVersion, toast],
   );
 
   const addDiffComment = useCallback(
@@ -157,7 +184,7 @@ function ReviewWorkspace() {
       void endpoints
         .deleteComment(projectKey, version, id)
         .then(() => {
-          invalidate(`comments:${projectKey}:${version}`);
+          refresh(keys.comments(projectKey, version));
           toast('Comment deleted');
         })
         .catch((err) => toast(err instanceof Error ? err.message : 'Delete failed', 'error'));
@@ -166,17 +193,22 @@ function ReviewWorkspace() {
   );
 
   const replyComment = useCallback(
-    async (rootId: string, body: string) => {
+    async (rootId: string, body: string, delivery: CreateCommentInput['delivery'] = 'decision') => {
       if (!projectKey || !version) return;
       try {
-        await endpoints.replyToComment(projectKey, version, rootId, body);
-        invalidate(`comments:${projectKey}:${version}`);
+        await endpoints.replyToComment(projectKey, version, rootId, {
+          body,
+          delivery,
+          reviewId: reviewOnVersion ? review?.id : delivery === 'ask' ? activeMcpReview?.id : undefined,
+        });
+        refresh(keys.comments(projectKey, version));
+        toast(delivery === 'ask' ? 'Asked agent' : reviewOnVersion ? 'Added to decision batch' : 'Note added', 'success');
       } catch (err) {
         toast(err instanceof Error ? err.message : 'Reply failed', 'error');
         throw err;
       }
     },
-    [projectKey, version, toast],
+    [projectKey, version, activeMcpReview?.id, review?.id, reviewOnVersion, toast],
   );
 
   const resolveComment = useCallback(
@@ -184,7 +216,7 @@ function ReviewWorkspace() {
       if (!projectKey || !version) return;
       void endpoints
         .resolveComment(projectKey, version, id, resolved)
-        .then(() => invalidate(`comments:${projectKey}:${version}`))
+        .then(() => refresh(keys.comments(projectKey, version)))
         .catch((err) => toast(err instanceof Error ? err.message : 'Update failed', 'error'));
     },
     [projectKey, version, toast],
@@ -195,22 +227,23 @@ function ReviewWorkspace() {
       if (!contextualReviewId) return;
       try {
         const res = await endpoints.decide(contextualReviewId, decision, summary);
-        invalidate(keys.projects, `review:${contextualReviewId}`, keys.reviewsPending);
+        refresh(keys.projects, keys.review(contextualReviewId), keys.reviewsPending);
+        if (projectKey && version) refresh(keys.comments(projectKey, version));
         if (decision === 'approve') {
           toast(
             res.commentCount > 0
-              ? `Approved with ${res.commentCount} comment${res.commentCount === 1 ? '' : 's'} — Claude will proceed and incorporate them`
-              : 'Approved — Claude will proceed',
+              ? `Approved with ${res.commentCount} comment${res.commentCount === 1 ? '' : 's'} — the agent will proceed and incorporate them`
+              : 'Approved — the agent will proceed',
             'success',
           );
         } else {
-          toast('Changes requested — feedback sent to Claude', 'success');
+          toast('Changes requested — feedback sent to the agent', 'success');
         }
       } catch (err) {
         toast(err instanceof Error ? err.message : 'Decision failed', 'error');
       }
     },
-    [contextualReviewId, toast],
+    [contextualReviewId, projectKey, version, toast],
   );
 
   // --- dialogs ---------------------------------------------------------------
@@ -239,13 +272,13 @@ function ReviewWorkspace() {
   }, [railOpen]);
   const onGistSaved = useCallback(
     (_binding: GistBinding) => {
-      if (projectKey) invalidate(`storage:${projectKey}`);
+      if (projectKey) refresh(keys.storage(projectKey));
     },
     [projectKey],
   );
 
   const resyncAfterChange = useCallback(() => {
-    invalidate(keys.projects);
+    refresh(keys.projects);
   }, []);
 
   // If the active project vanished (deleted), fall back to first remaining.
@@ -275,7 +308,7 @@ function ReviewWorkspace() {
           <EmptyState
             icon={<span className="text-4xl">📋</span>}
             title="No plans yet"
-            body="When Claude finishes a plan in plan mode, it lands here for your review — rendered like a README, annotatable line by line, with your decision flowing straight back to the agent."
+            body="When the agent finishes a plan in plan mode, it lands here for your review — rendered like a README, annotatable line by line, with your decision flowing straight back to the agent."
           />
         )
       ) : (
@@ -283,7 +316,7 @@ function ReviewWorkspace() {
           <Sidebar
             versions={versions}
             activeVersion={version}
-            onVersionChange={(n) => setParams({ version: n })}
+            onVersionChange={(n) => setParams({ version: n, review: null })}
             manifest={manifest}
             activeDoc={docSlug}
             onDocChange={(slug) => setParams({ doc: slug })}
@@ -298,9 +331,9 @@ function ReviewWorkspace() {
           <main className="flex min-w-0 flex-1 flex-col">
             <ReviewBar
               review={review}
+              projectKey={projectKey}
               viewingVersion={version ?? -1}
               threadCount={actionable.length}
-              messageCount={allComments.length}
               onApprove={() => decide('approve')}
               onReject={(summary) => decide('reject', summary)}
             />
@@ -349,6 +382,7 @@ function ReviewWorkspace() {
                 activeVersion={version ?? 0}
                 activeDoc={docSlug}
                 comments={allComments}
+                deliveryUI={deliveryUI}
                 onAddComment={addDiffComment}
                 onDeleteComment={deleteComment}
                 onReply={replyComment}
@@ -359,6 +393,7 @@ function ReviewWorkspace() {
                 html={html}
                 loading={versionPayload.loading || docPayload.loading}
                 comments={docComments}
+                deliveryUI={deliveryUI}
                 section={section}
                 generalNoteTick={generalNoteTick}
                 onAddComment={addComment}
@@ -399,7 +434,7 @@ function ReviewWorkspace() {
             <Sidebar
               versions={versions}
               activeVersion={version}
-              onVersionChange={(n) => setParams({ version: n })}
+              onVersionChange={(n) => setParams({ version: n, review: null })}
               manifest={manifest}
               activeDoc={docSlug}
               onDocChange={(slug) => setParams({ doc: slug })}

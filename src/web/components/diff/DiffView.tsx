@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createContext, useContext } from 'react';
-import type { Comment, CommentThreadView, DiffDocEntry, DiffDocStatus, DiffResponse, VersionInfo } from '../../../shared/types.js';
+import type { Comment, CommentDelivery, CommentThreadView, CreateCommentInput, DiffDocEntry, DiffDocStatus, DiffResponse, VersionInfo } from '../../../shared/types.js';
 import { groupThreads } from '../../../shared/threads.js';
 import {
   computeHunks,
@@ -15,20 +15,18 @@ import { useApi } from '../../api/cache.js';
 import { endpoints, keys } from '../../api/endpoints.js';
 import { EmptyState, ErrorNote, Pill, Select, Spinner, cx } from '../primitives.js';
 import { IconChat, IconCheck, IconDiff, IconEye } from '../icons.js';
-import { CommentComposer, type ComposerState } from '../comments/CommentComposer.js';
+import { CommentComposer, type CommentDeliveryUI, type ComposerState } from '../comments/CommentComposer.js';
 import { CommentThread } from '../comments/CommentThread.js';
 
 export type DiffSide = 'old' | 'new';
 
-export interface DiffCommentInput {
+export type DiffCommentInput = CreateCommentInput & {
   doc: string;
   side: DiffSide;
-  baseVersion?: number;
   line: number;
   lineEnd: number;
-  quote: string | null;
   body: string;
-}
+};
 
 /** A word-level selection resolved to a diff anchor. */
 interface SelectionCommentArgs {
@@ -49,9 +47,10 @@ export interface DiffViewProps {
   activeDoc: string | null;
   /** Every comment on the reviewed version (all docs). */
   comments: Comment[];
+  deliveryUI: CommentDeliveryUI;
   onAddComment: (input: DiffCommentInput) => Promise<void>;
   onDeleteComment: (id: string) => void;
-  onReply: (rootId: string, body: string) => Promise<void>;
+  onReply: (rootId: string, body: string, delivery: CommentDelivery) => Promise<void>;
   onResolve: (rootId: string, resolved: boolean) => void;
 }
 
@@ -124,6 +123,7 @@ export function DiffView({
   activeVersion,
   activeDoc,
   comments,
+  deliveryUI,
   onAddComment,
   onDeleteComment,
   onReply,
@@ -221,7 +221,14 @@ export function DiffView({
       setComposer({
         doc: args.doc,
         side: args.side,
-        state: { x: args.x, y: args.y, quote: args.quote, line: args.line, lineEnd: args.lineEnd },
+        state: {
+          x: args.x,
+          y: args.y,
+          quote: args.quote,
+          line: args.line,
+          lineEnd: args.lineEnd,
+          boundaryTop: scrollRef.current?.getBoundingClientRect().top ?? 0,
+        },
       });
     },
     [],
@@ -313,12 +320,14 @@ export function DiffView({
   // Clear stale affordances when the diff payload changes.
   useEffect(() => {
     setBubble(null);
-  }, [data]);  if (versions.length <= 1) {
+    setComposer(null);
+  }, [data, projectKey, activeVersion, fromVersion, deliveryUI.reviewId]);
+  if (versions.length <= 1) {
     return (
       <EmptyState
         icon={<IconDiff className="h-8 w-8" />}
         title="Nothing to diff yet"
-        body="This is the only version of the plan. When Claude re-presents a revised plan it becomes v2 and you can compare the two here."
+        body="This is the only version of the plan. When the agent re-presents a revised plan it becomes v2 and you can compare the two here."
       />
     );
   }
@@ -423,6 +432,7 @@ export function DiffView({
                   onSetCollapsed={(collapsed) => toggleDoc(entry.slug, collapsed)}
                   onComment={openComposer}
                   onDeleteComment={onDeleteComment}
+                  deliveryUI={deliveryUI}
                   onReply={onReply}
                   onResolve={onResolve}
                 />
@@ -449,7 +459,8 @@ export function DiffView({
       {composer && (
         <CommentComposer
           state={composer.state}
-          onSubmit={async (body) => {
+          deliveryUI={deliveryUI}
+          onSubmit={async (body, delivery) => {
             await onAddComment({
               doc: composer.doc,
               side: composer.side,
@@ -458,6 +469,7 @@ export function DiffView({
               lineEnd: composer.state.lineEnd ?? composer.state.line!,
               quote: composer.state.quote,
               body,
+              delivery,
             });
             setComposer(null);
           }}
@@ -480,6 +492,7 @@ interface DocSectionProps {
   commentIndex: Map<string, Comment[]>;
   gapOverride: Map<string, boolean>;
   onToggleGap: (key: string, currentlyOpen: boolean) => void;
+  deliveryUI: CommentDeliveryUI;
   collapsed: boolean;
   onSetCollapsed: (collapsed: boolean) => void;
   onComment: (args: {
@@ -492,7 +505,7 @@ interface DocSectionProps {
     y: number;
   }) => void;
   onDeleteComment: (id: string) => void;
-  onReply: (rootId: string, body: string) => Promise<void>;
+  onReply: (rootId: string, body: string, delivery: CommentDelivery) => Promise<void>;
   onResolve: (rootId: string, resolved: boolean) => void;
 }
 
@@ -504,6 +517,7 @@ function DocSection({
   commentIndex,
   gapOverride,
   onToggleGap,
+  deliveryUI,
   collapsed,
   onSetCollapsed,
   onComment,
@@ -652,6 +666,7 @@ function DocSection({
                             doc: entry.slug,
                             threadsByAnchor,
                             onDelete: onDeleteComment,
+                            deliveryUI,
                             onReply,
                             onResolve,
                           })}
@@ -677,6 +692,7 @@ function DocSection({
                 thread={thread}
                 onDelete={onDeleteComment}
                 onReply={onReply}
+                deliveryUI={deliveryUI}
                 onResolve={onResolve}
                 label={thread.root.side === 'old' ? `removed in v${thread.root.baseVersion ?? '?'}` : undefined}
                 compact
@@ -696,6 +712,7 @@ function DocSection({
                 thread={thread}
                 onDelete={onDeleteComment}
                 onReply={onReply}
+                deliveryUI={deliveryUI}
                 onResolve={onResolve}
                 compact
               />
@@ -869,6 +886,7 @@ function threadRow({
   doc,
   threadsByAnchor,
   onDelete,
+  deliveryUI,
   onReply,
   onResolve,
 }: {
@@ -877,7 +895,8 @@ function threadRow({
   doc: string;
   threadsByAnchor: Map<string, CommentThreadView[]>;
   onDelete: (id: string) => void;
-  onReply: (rootId: string, body: string) => Promise<void>;
+  deliveryUI: CommentDeliveryUI;
+  onReply: (rootId: string, body: string, delivery: CommentDelivery) => Promise<void>;
   onResolve: (rootId: string, resolved: boolean) => void;
 }): ReactNode {
   const threads: CommentThreadView[] = [];
@@ -897,6 +916,7 @@ function threadRow({
               thread={thread}
               onDelete={onDelete}
               onReply={onReply}
+              deliveryUI={deliveryUI}
               onResolve={onResolve}
               label={thread.root.side === 'old' ? `removed in v${thread.root.baseVersion ?? '?'}` : undefined}
             />

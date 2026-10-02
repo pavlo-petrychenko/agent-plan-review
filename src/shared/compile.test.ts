@@ -128,6 +128,18 @@ test('resolved threads drop out of feedback entirely', () => {
   assert.ok(!out.includes('answered question'));
 });
 
+test('delivery choice does not change final compiler eligibility', () => {
+  const asked = c({ id: 'r1', body: 'asked now', delivery: 'ask', wakeReviewId: 'review-1' });
+  const batched = c({ id: 'r2', body: 'batched for decision', delivery: 'decision' });
+  const legacy = c({ id: 'r3', body: 'legacy decision note' });
+  const rejection = compileRejection([asked, batched, legacy], undefined, noResolve, 2);
+  const approval = compileApproval([asked, batched, legacy], undefined, noResolve);
+  for (const body of ['asked now', 'batched for decision', 'legacy decision note']) {
+    assert.match(rejection, new RegExp(body));
+    assert.match(approval, new RegExp(body));
+  }
+});
+
 test('approval counts open threads, not raw comments', () => {
   const root = c({ id: 'r1', line: 3, body: 'note' });
   const reply = c({ id: 'a1', parentId: 'r1', author: 'agent', body: 'ack' });

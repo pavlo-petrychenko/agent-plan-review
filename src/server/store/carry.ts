@@ -33,7 +33,7 @@ export async function carryOpenThreads(args: {
   const all = await comments.list(key, fromN);
   if (all.length === 0) return 0;
 
-  const roots = all.filter((c) => c.parentId == null && !c.resolved);
+  const roots = all.filter((c) => c.parentId == null && !c.resolved && c.decisionReviewId == null);
   if (roots.length === 0) return 0;
   const repliesByRoot = new Map<string, Comment[]>();
   for (const c of all) {

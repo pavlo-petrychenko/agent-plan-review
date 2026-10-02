@@ -35,7 +35,10 @@ class McpDriver {
   /** Resolvers waiting for a response with a given id. */
   private pending = new Map<number | string, (msg: Rpc) => void>();
 
-  constructor(readonly home: string, extraEnv: Record<string, string> = {}) {
+  constructor(
+    readonly home: string,
+    extraEnv: Record<string, string> = {},
+  ) {
     this.proc = spawn(
       process.execPath,
       ['--import', 'tsx', path.join(REPO_ROOT, 'src', 'server', 'cli.ts'), 'mcp'],
@@ -87,7 +90,11 @@ class McpDriver {
     });
   }
 
-  async callTool(name: string, args: Record<string, unknown>, meta?: Record<string, unknown>): Promise<string> {
+  async callTool(
+    name: string,
+    args: Record<string, unknown>,
+    meta?: Record<string, unknown>,
+  ): Promise<string> {
     const params: Record<string, unknown> = { name, arguments: args };
     if (meta) params._meta = meta;
     const res = await this.request('tools/call', params);
@@ -125,14 +132,23 @@ function decideReview(home: string, reviewId: string, status: 'approved' | 'reje
 }
 
 /** Append a human comment to a review's version — what the UI/API does. */
-function addHumanComment(home: string, reviewId: string, body: string): string {
-  const review = JSON.parse(
-    fs.readFileSync(path.join(home, 'reviews', `${reviewId}.json`), 'utf8'),
-  ) as { projectKey: string; version: number };
+function addHumanComment(
+  home: string,
+  reviewId: string,
+  body: string,
+  delivery: 'ask' | 'decision' = 'ask',
+  wakeReviewId = reviewId,
+): string {
+  const review = JSON.parse(fs.readFileSync(path.join(home, 'reviews', `${reviewId}.json`), 'utf8')) as {
+    projectKey: string;
+    version: number;
+  };
   const dir = path.join(home, 'projects', review.projectKey, 'comments');
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `${String(review.version).padStart(4, '0')}.json`);
-  const comments = fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>[]) : [];
+  const comments = fs.existsSync(file)
+    ? (JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>[])
+    : [];
   const comment = {
     id: `c${comments.length + 1}`,
     doc: 'root',
@@ -142,6 +158,8 @@ function addHumanComment(home: string, reviewId: string, body: string): string {
     body,
     author: 'me',
     createdAt: new Date().toISOString(),
+    delivery,
+    ...(delivery === 'ask' ? { wakeReviewId } : {}),
   };
   comments.push(comment);
   fs.writeFileSync(file, JSON.stringify(comments));
@@ -149,9 +167,10 @@ function addHumanComment(home: string, reviewId: string, body: string): string {
 }
 
 function readComments(home: string, reviewId: string): Record<string, unknown>[] {
-  const review = JSON.parse(
-    fs.readFileSync(path.join(home, 'reviews', `${reviewId}.json`), 'utf8'),
-  ) as { projectKey: string; version: number };
+  const review = JSON.parse(fs.readFileSync(path.join(home, 'reviews', `${reviewId}.json`), 'utf8')) as {
+    projectKey: string;
+    version: number;
+  };
   const file = path.join(
     home,
     'projects',
@@ -170,9 +189,16 @@ beforeEach(async () => {
 
 /** initialize handshake + submit a minimal plan; returns driver + reviewId. */
 async function submitPlan(driver: McpDriver): Promise<string> {
-  await driver.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } });
+  await driver.request('initialize', {
+    protocolVersion: '2025-06-18',
+    capabilities: {},
+    clientInfo: { name: 'test', version: '0' },
+  });
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'apr-proj-'));
-  const text = await driver.callTool('plan_review_submit', { cwd: projectDir, markdown: '# Test Plan\n\nDo the thing.' });
+  const text = await driver.callTool('plan_review_submit', {
+    cwd: projectDir,
+    markdown: '# Test Plan\n\nDo the thing.',
+  });
   const match = text.match(/"reviewId":\s*"([^"]+)"/);
   assert.ok(match, `submit should return reviewId, got: ${text}`);
   return match[1];
@@ -214,7 +240,10 @@ test('wait_seconds above AGENT_PLAN_REVIEW_MAX_WAIT clamps and returns pending a
 });
 
 test('long polls emit periodic notifications/progress keepalives', async () => {
-  const driver = new McpDriver(home, { AGENT_PLAN_REVIEW_MAX_WAIT: '3', AGENT_PLAN_REVIEW_PROGRESS_MS: '250' });
+  const driver = new McpDriver(home, {
+    AGENT_PLAN_REVIEW_MAX_WAIT: '3',
+    AGENT_PLAN_REVIEW_PROGRESS_MS: '250',
+  });
   try {
     const reviewId = await submitPlan(driver);
     const text = await driver.callTool(
@@ -235,14 +264,20 @@ test('long polls emit periodic notifications/progress keepalives', async () => {
   }
 });
 
-test('submit steering text prescribes ONE long call and forbids resubmit-while-pending', async () => {  const driver = new McpDriver(home);
+test('submit steering text prescribes ONE long call and forbids resubmit-while-pending', async () => {
+  const driver = new McpDriver(home);
   try {
-    await driver.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } });
+    await driver.request('initialize', {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 't', version: '0' },
+    });
     const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'apr-proj-'));
     const text = await driver.callTool('plan_review_submit', { cwd: projectDir, markdown: '# P\n\nx' });
     assert.match(text, /ONE long call/);
     assert.match(text, /wait_seconds.*172800/);
     assert.match(text, /do NOT re-call and do NOT re-submit/);
+    assert.match(text, /decision batch do not wake you/i);
 
     const checkDesc = await driver.request('tools/list', {});
     const tools = (checkDesc.result as { tools: { name: string; description: string }[] }).tools;
@@ -250,13 +285,14 @@ test('submit steering text prescribes ONE long call and forbids resubmit-while-p
     assert.ok(check);
     assert.match(check.description, /TRUE LONG-POLL/);
     assert.match(check.description, /recommended: wait_seconds.*172800/);
+    assert.match(check.description, /decision batch stay silent/i);
     assert.doesNotMatch(check.description, /Keep calling/);
   } finally {
     driver.close();
   }
 });
 
-test('check surfaces a human thread message and plan_review_reply answers it once', async () => {
+test('check surfaces a targeted Ask and plan_review_reply answers it once', async () => {
   const driver = new McpDriver(home);
   try {
     const reviewId = await submitPlan(driver);
@@ -287,6 +323,60 @@ test('check surfaces a human thread message and plan_review_reply answers it onc
     // The cursor means the same message is not handed over twice.
     const again = await driver.callTool('plan_review_check', { reviewId, wait_seconds: 1 });
     assert.doesNotMatch(again, /why this approach\?/);
+  } finally {
+    driver.close();
+  }
+});
+
+test('wait_seconds zero still checks for an Ask already posted', async () => {
+  const driver = new McpDriver(home);
+  try {
+    const reviewId = await submitPlan(driver);
+    addHumanComment(home, reviewId, 'already waiting');
+    const text = await driver.callTool('plan_review_check', { reviewId, wait_seconds: 0 });
+    assert.match(text, /newComments/);
+    assert.match(text, /already waiting/);
+  } finally {
+    driver.close();
+  }
+});
+
+test('review lookup without reviewId never falls back to another project', async () => {
+  const driver = new McpDriver(home);
+  try {
+    await submitPlan(driver);
+    const text = await driver.callTool('plan_review_check', { wait_seconds: 0 });
+    assert.match(text, /"status":\s*"not_found"/);
+  } finally {
+    driver.close();
+  }
+});
+
+test('decision-batch comments do not wake a pending check', async () => {
+  const driver = new McpDriver(home);
+  try {
+    const reviewId = await submitPlan(driver);
+    addHumanComment(home, reviewId, 'wait until I decide', 'decision');
+    const text = await driver.callTool('plan_review_check', { reviewId, wait_seconds: 1 });
+    assert.match(text, /"status":\s*"pending"/);
+    assert.doesNotMatch(text, /newComments/);
+    assert.doesNotMatch(text, /wait until I decide/);
+  } finally {
+    driver.close();
+  }
+});
+
+test('plan_review_reply rejects a decision-batch thread', async () => {
+  const driver = new McpDriver(home);
+  try {
+    const reviewId = await submitPlan(driver);
+    const commentId = addHumanComment(home, reviewId, 'not conversational yet', 'decision');
+    const text = await driver.callTool('plan_review_reply', { reviewId, commentId, body: 'answer' });
+    assert.match(text, /not an Ask for this review/);
+    assert.equal(
+      readComments(home, reviewId).some((comment) => comment.author === 'agent'),
+      false,
+    );
   } finally {
     driver.close();
   }

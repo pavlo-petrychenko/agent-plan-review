@@ -1,9 +1,9 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Comment, CommentThreadView } from '../../../shared/types.js';
+import type { Comment, CommentDelivery, CommentThreadView, CreateCommentInput } from '../../../shared/types.js';
 import { groupThreads } from '../../../shared/threads.js';
 import { parseBlocks, type MdBlock } from './blocks.js';
 import { CommentThread } from '../comments/CommentThread.js';
-import { CommentComposer, type ComposerState } from '../comments/CommentComposer.js';
+import { CommentComposer, type CommentDeliveryUI, type ComposerState } from '../comments/CommentComposer.js';
 import { ImageLightbox } from './ImageLightbox.js';
 import { EmptyState, cx } from '../primitives.js';
 import { IconChat } from '../icons.js';
@@ -21,12 +21,13 @@ export interface PreviewPaneProps {
   loading: boolean;
   /** All comments for the active version+doc. */
   comments: Comment[];
+  deliveryUI: CommentDeliveryUI;
   section: SectionFilter | null;
   /** Increment to open the general-note composer. */
   generalNoteTick?: number;
-  onAddComment: (input: { body: string; quote: string | null; line: number | null; lineEnd: number | null }) => Promise<void>;
+  onAddComment: (input: CreateCommentInput) => Promise<void>;
   onDeleteComment: (id: string) => void;
-  onReply: (rootId: string, body: string) => Promise<void>;
+  onReply: (rootId: string, body: string, delivery: CommentDelivery) => Promise<void>;
   onResolve: (rootId: string, resolved: boolean) => void;
   onNavigateDoc: (slug: string) => void;
 }
@@ -35,6 +36,7 @@ export function PreviewPane({
   html,
   loading,
   comments,
+  deliveryUI,
   section,
   generalNoteTick = 0,
   onAddComment,
@@ -91,7 +93,7 @@ export function PreviewPane({
     setBubble(null);
     setPendingSelection(null);
     setComposer(null);
-  }, [html]);
+  }, [html, deliveryUI.reviewId]);
 
   // Render ```mermaid code blocks in-place (no-ops when none present).
   // Depends on section/theme too: filtering remounts blocks, toggling the
@@ -112,6 +114,7 @@ export function PreviewPane({
       quote: null,
       line: null,
       lineEnd: null,
+      boundaryTop: containerRef.current?.getBoundingClientRect().top ?? 0,
     });
   }, [generalNoteTick]);
 
@@ -179,6 +182,7 @@ export function PreviewPane({
       quote: pendingSelection.quote,
       line: pendingSelection.line,
       lineEnd: pendingSelection.lineEnd,
+      boundaryTop: containerRef.current?.getBoundingClientRect().top ?? 0,
     });
     setBubble(null);
     window.getSelection()?.removeAllRanges();
@@ -306,6 +310,7 @@ export function PreviewPane({
                     thread={thread}
                     onDelete={onDeleteComment}
                     onReply={onReply}
+                    deliveryUI={deliveryUI}
                     onResolve={onResolve}
                     onLocate={() => scrollToBlock(thread.root.lineEnd ?? block.lineEnd)}
                   />
@@ -328,6 +333,7 @@ export function PreviewPane({
                   thread={thread}
                   onDelete={onDeleteComment}
                   onReply={onReply}
+                  deliveryUI={deliveryUI}
                   onResolve={onResolve}
                 />
               )),
@@ -343,6 +349,7 @@ export function PreviewPane({
                   thread={thread}
                   onDelete={onDeleteComment}
                   onReply={onReply}
+                  deliveryUI={deliveryUI}
                   onResolve={onResolve}
                   compact
                 />
@@ -369,9 +376,11 @@ export function PreviewPane({
       {composer && (
         <CommentComposer
           state={composer}
-          onSubmit={async (body) => {
+          deliveryUI={deliveryUI}
+          onSubmit={async (body, delivery) => {
             await onAddComment({
               body,
+              delivery,
               quote: composer.quote,
               line: composer.line,
               lineEnd: composer.lineEnd,

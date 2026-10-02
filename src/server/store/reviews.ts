@@ -1,7 +1,7 @@
 import type { Review, ReviewStatus } from '../../shared/types.js';
 import { RESOLVED_TTL_MS } from '../config.js';
 import type { Layout } from './paths.js';
-import { ensureDir, listFiles, readJson, writeJson, removePath } from '../util/fs.js';
+import { ensureDir, listFiles, readJson, removePath, withFileLock, writeJson } from '../util/fs.js';
 
 /**
  * Review persistence. Reviews are top-level (not nested per project) so the
@@ -34,21 +34,29 @@ export class ReviewStore {
   }
 
   async update(id: string, patch: Partial<Review>): Promise<Review | null> {
-    const current = await this.get(id);
-    if (!current) return null;
-    const next: Review = { ...current, ...patch };
-    await writeJson(this.layout.reviewFile(id), next);
-    return next;
+    return withFileLock(this.layout.reviewFile(id), async () => {
+      const current = await this.get(id);
+      if (!current) return null;
+      const next: Review = { ...current, ...patch };
+      await writeJson(this.layout.reviewFile(id), next);
+      return next;
+    });
   }
 
   /** Decide a pending review; returns null when it was not pending. */
-  async decide(id: string, decision: 'approve' | 'reject', payload: { notes?: string; reason?: string }): Promise<Review | null> {
-    const current = await this.get(id);
-    if (!current || current.status !== 'pending') return null;
-    return this.update(id, {
-      status: decision === 'approve' ? 'approved' : 'rejected',
-      resolvedAt: new Date().toISOString(),
-      ...(decision === 'approve' ? { notes: payload.notes } : { reason: payload.reason }),
+  async decide(
+    id: string,
+    decision: 'approve' | 'reject',
+    payload: { notes?: string; reason?: string },
+  ): Promise<Review | null> {
+    return withFileLock(this.layout.reviewFile(id), async () => {
+      const current = await this.get(id);
+      if (!current || current.status !== 'pending') return null;
+      return this.update(id, {
+        status: decision === 'approve' ? 'approved' : 'rejected',
+        resolvedAt: new Date().toISOString(),
+        ...(decision === 'approve' ? { notes: payload.notes } : { reason: payload.reason }),
+      });
     });
   }
 

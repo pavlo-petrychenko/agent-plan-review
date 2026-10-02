@@ -93,9 +93,11 @@ Add to `~/.claude/settings.json`:
      projectKey, version }`. `images[]` (`{ name, path | dataBase64 }`) are stored and
      `image:<name>` references in the text are rewritten to served URLs.
    - **`plan_review_check`** `{ reviewId?, wait_seconds? }` → TRUE LONG-POLL: returns the
-     moment the decision lands or `wait_seconds` elapses (ceiling `AGENT_PLAN_REVIEW_MAX_WAIT`,
-     default 172800 s = 48 h). Returns `pending` / `approved (+notes)` / `rejected (+reason)`.
-     The intended strategy is ONE long call per review — never a short-poll loop. Emits
+     moment the decision lands, the human chooses **Ask agent** on a comment, or `wait_seconds`
+     elapses (ceiling `AGENT_PLAN_REVIEW_MAX_WAIT`, default 172800 s = 48 h). Comments added to
+     the **decision batch** stay silent until approval or requested changes. Returns `pending` /
+     `approved (+notes)` / `rejected (+reason)`. The intended strategy is ONE long call per review —
+     never a short-poll loop. Emits
      periodic progress notifications so silent calls survive client idle-timeouts.
      Clients that auto-background long calls (Claude Code after ~2 min) deliver the result
      on their own; the steering text tells agents not to re-call or re-submit then.
@@ -119,6 +121,11 @@ Add to `~/.claude/settings.json`:
 The server starts itself on first use (`EADDRINUSE` from a second instance exits 0
 quietly). Rejection reasons compiled for MCP/API reviews instruct re-submission via
 `plan_review_submit`; hook-origin reviews say `ExitPlanMode`.
+
+Immediate **Ask agent** delivery is available for pending MCP reviews. Hook/API
+reviews can add to the decision batch, but this repository does not ship an
+OpenCode conversation plugin; porting a separate OpenCode integration requires a
+persisted session binding before it can offer Ask.
 
 ## Multi-document plans
 
@@ -148,18 +155,20 @@ Root content…
   scripts stripped; outline navigation with display-only section filtering; document
   navigator with per-doc comment counts for tree plans.
 - **Annotating** — select any text → thread anchored to those source lines (quotes
-  captured verbatim); general notes; comments persist per version and survive
-  byte-identical re-presentations (content-hash dedup).
+  captured verbatim); general notes; every human message chooses **Ask agent** for
+  an immediate MCP conversation or **Add to decision** to stay silent until the
+  review is decided. Cmd/Ctrl+Enter always uses the safe decision action.
 - **Imaging** — attach screenshots to a plan (`images[]` on submit, `plan_review_attach_image`,
   or `POST /api/images`). They are content-addressed under the storage root, referenced from the
   markdown as `image:<name>` (rewritten to a served URL), and open at full size in a viewer with
   the alt text as its caption. A reference to an image nobody attached fails validation by name
   instead of rendering a broken link.
-- **Threading** — every comment is a conversation: the agent answers questions on the
-  line with `plan_review_reply`, you reply back, and you resolve a thread when it is
-  done. Agent replies are never compiled into feedback; a thread stays actionable
-  until you resolve it. Open threads carry forward to the next version, re-anchored
-  through the diff, so the discussion stays on the revised plan.
+- **Threading** — every comment is a conversation: **Ask agent** wakes a pending
+  MCP review for an immediate answer, while **decision batch** comments remain
+  silent until Approve or Request changes. You can reply with either delivery
+  choice and resolve a thread when it is done. Agent replies are never compiled
+  into final feedback; unresolved threads carry forward to the next version,
+  re-anchored through the diff.
 - **Deciding** — pending/approved/rejected surfaced at all times; buttons only enabled
   when viewing the exact version under review; ~2.5 s polling while pending.
 - **Comparing** — GitHub-style all-pages diff against any base version: every page in

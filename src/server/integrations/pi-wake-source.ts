@@ -17,7 +17,7 @@ export const PI_WAKE_EXTENSION_SOURCE = `/**
  * of blocking on a long plan_review_check call.
  *
  * Also polls the pending review's comments file and injects a turn when the
- * human writes to a thread, so the agent can answer with plan_review_reply.
+ * human chooses Ask agent, so the agent can answer with plan_review_reply.
  *
  * Also maintains a heartbeat (~/.agent-plan-review/wake-active.json) so the
  * Claude Code stop-gate stands down on machines where a waker exists.
@@ -197,9 +197,21 @@ function scan(initial) {
   function pollComments() {
     for (const entry of reviewById.values()) {
       const review = entry.review;
-      if (!review || review.status !== 'pending') continue;
+      if (!review || review.status !== 'pending' || review.origin === 'hook') continue;
       if (review.cwd && !sameProject(review.cwd, process.cwd())) continue;
-      const humans = readComments(review).filter((c) => c && c.author === 'me');
+      const stored = readComments(review);
+      const resolvedRoots = new Set(
+        stored.filter((c) => c && c.parentId == null && c.resolved).map((c) => c.id),
+      );
+      const humans = stored.filter(
+        (c) =>
+          c &&
+          c.author === 'me' &&
+          c.delivery === 'ask' &&
+          c.wakeReviewId === review.id &&
+          !resolvedRoots.has(c.parentId || c.id) &&
+          (!review.agentCursor || c.createdAt > review.agentCursor),
+      );
       let newest = '';
       for (const c of humans) if (typeof c.createdAt === 'string' && c.createdAt > newest) newest = c.createdAt;
       const prev = humanSeen.get(review.id);
@@ -214,7 +226,7 @@ function scan(initial) {
         .map((c) => '- [threadId ' + (c.parentId || c.id) + '] ' + (c.quote ? '"' + c.quote + '" — ' : '') + c.body)
         .join('\\n');
       const content =
-        'The human wrote to you on plan review (v' + review.version + '):\\n' + lines +
+        'The human chose Ask agent on plan review (v' + review.version + '):\\n' + lines +
         '\\n\\nAnswer each with plan_review_reply { "reviewId": "' + review.id +
         '", "commentId": "<threadId>", "body": "..." }, then call plan_review_check again. ' +
         'This is a discussion thread — not every thread needs a plan change.';

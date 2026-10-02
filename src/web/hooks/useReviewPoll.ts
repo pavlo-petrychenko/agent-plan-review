@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import type { Review } from '../../shared/types.js';
 import { apiCache, useApi } from '../api/cache.js';
 import { endpoints, keys } from '../api/endpoints.js';
@@ -18,8 +18,14 @@ export interface ReviewPollResult {
  * `reviewPollDelay`; goes quiet once resolved. A hidden tab does no polling at all
  * and refreshes immediately on return, so a backgrounded tab costs nothing and is
  * never stale when you look at it again.
+ *
+ * `onTick` fires on every poll. A pending review's comment thread is only as live
+ * as the review itself — an agent reply lands in the comments, not in the review
+ * record — so callers use this to keep their own live slices moving in step. It is
+ * held in a ref and kept out of the effect deps: an inline callback must not be
+ * able to restart the poll and reset its backoff on every render.
  */
-export function useReviewPoll(reviewId: string | null): ReviewPollResult {
+export function useReviewPoll(reviewId: string | null, onTick?: () => void): ReviewPollResult {
   const { data, loading, error, reload } = useApi<Review>(
     reviewId ? keys.review(reviewId) : null,
     async () => {
@@ -27,6 +33,11 @@ export function useReviewPoll(reviewId: string | null): ReviewPollResult {
       return r;
     },
   );
+
+  const onTickRef = useRef(onTick);
+  useEffect(() => {
+    onTickRef.current = onTick;
+  }, [onTick]);
 
   const pending = data?.status === 'pending';
   const status = data?.status;
@@ -51,6 +62,7 @@ export function useReviewPoll(reviewId: string | null): ReviewPollResult {
         return;
       }
       reload();
+      onTickRef.current?.();
       schedule();
     };
     const onVisibility = (): void => {
@@ -58,6 +70,7 @@ export function useReviewPoll(reviewId: string | null): ReviewPollResult {
       startedAt = Date.now();
       if (timer) window.clearTimeout(timer);
       reload();
+      onTickRef.current?.();
       schedule();
     };
 
@@ -74,6 +87,7 @@ export function useReviewPoll(reviewId: string | null): ReviewPollResult {
   useEffect(() => {
     if (status != null && status !== 'pending') {
       void apiCache.refetch(keys.projects, endpoints.listProjects);
+      void apiCache.refetch(keys.reviewsPending, () => endpoints.listReviews({ status: 'pending' }));
     }
   }, [status]);
 

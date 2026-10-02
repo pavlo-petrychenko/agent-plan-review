@@ -5,12 +5,11 @@ import { IconCheck, IconX } from '../icons.js';
 
 export interface ReviewBarProps {
   review: Review | undefined;
+  projectKey: string | null;
   /** Version currently being viewed. */
   viewingVersion: number;
   /** Open threads the compiler would send (one entry per thread). */
   threadCount: number;
-  /** Every stored message, replies included — context, not the promise. */
-  messageCount: number;
   onApprove: () => Promise<void>;
   onReject: (summary?: string) => Promise<void>;
 }
@@ -20,14 +19,21 @@ export interface ReviewBarProps {
  * the human is viewing the exact version under review; the resolved pill
  * remains afterwards as the record.
  */
-export function ReviewBar({ review, viewingVersion, threadCount, messageCount, onApprove, onReject }: ReviewBarProps) {
+export function ReviewBar({
+  review,
+  projectKey,
+  viewingVersion,
+  threadCount,
+  onApprove,
+  onReject,
+}: ReviewBarProps) {
   const [rejectOpen, setRejectOpen] = useState(false);
   const [busy, setBusy] = useState<'approve' | 'reject' | null>(null);
 
   if (!review) return null;
 
   const pending = review.status === 'pending';
-  const onReviewedVersion = review.version === viewingVersion;
+  const onReviewedVersion = review.projectKey === projectKey && review.version === viewingVersion;
 
   return (
     <>
@@ -57,10 +63,16 @@ export function ReviewBar({ review, viewingVersion, threadCount, messageCount, o
           </Pill>
         )}
 
-        {pending && threadCount > 0 && (
-          <span className="text-[12px] text-ink-muted">
-            {threadCount} open thread{threadCount === 1 ? '' : 's'}
-            {messageCount > threadCount ? ` · ${messageCount} messages` : ''} will ride along with your decision
+        {pending && (
+          <span
+            className={cx(
+              'min-h-4 text-[12px]',
+              threadCount > 0 ? 'text-ink-muted' : 'invisible',
+            )}
+          >
+            {threadCount > 0
+              ? `${threadCount} open thread${threadCount === 1 ? '' : 's'} will be included with your decision. Resolve a thread to exclude it.`
+              : 'No open threads'}
           </span>
         )}
 
@@ -130,8 +142,8 @@ function RejectModal({
   return (
     <Modal open={open} onClose={onClose} title="Request changes">
       <p className="mb-3 text-[13px] leading-relaxed text-ink-muted">
-        Every comment on this version is compiled into the feedback Claude receives — line comments first, then general
-        notes. A summary here becomes a general note.
+        Unresolved threads are included in the feedback the agent receives; resolved threads and agent replies
+        are not. The summary below is attached only to this decision.
       </p>
       <textarea
         value={summary}
@@ -157,7 +169,7 @@ function RejectModal({
             }
           }}
         >
-          Send changes to Claude
+          Send changes to agent
         </Button>
       </div>
     </Modal>

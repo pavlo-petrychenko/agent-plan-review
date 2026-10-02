@@ -19,6 +19,8 @@ export type ReviewStatus = 'pending' | 'approved' | 'rejected';
 /** Who wrote a comment. The agent replies through the reply tool/endpoint. */
 export type CommentAuthor = 'me' | 'agent';
 
+export type CommentDelivery = 'ask' | 'decision';
+
 /** A comment anchored either to source lines or to a document as a whole. */
 export interface Comment {
   id: string;
@@ -41,6 +43,9 @@ export interface Comment {
   body: string;
   author: CommentAuthor;
   createdAt: string;
+  delivery?: CommentDelivery;
+  wakeReviewId?: string;
+  decisionReviewId?: string;
   /**
    * Thread root this comment replies to; null/absent marks a thread root.
    * A reply inherits its anchor (doc/line/side/baseVersion) from the root.
@@ -117,7 +122,7 @@ export interface Review {
   notes?: string;
   toolUseId?: string;
   /**
-   * ISO timestamp of the newest human comment already handed to the agent by
+   * ISO timestamp of the newest targeted Ask already handed to the agent by
    * plan_review_check — the cursor that keeps the conversation from looping.
    */
   agentCursor?: string;
@@ -184,6 +189,8 @@ export interface CreateCommentInput {
   lineEnd?: number | null;
   quote?: string | null;
   body: string;
+  delivery?: CommentDelivery;
+  reviewId?: string;
   side?: 'old' | 'new';
   baseVersion?: number;
   /** Thread root this comment replies to (anchor inherited from the root). */
@@ -200,7 +207,7 @@ export interface CommentThreadView {
 export interface ReviewMessagesPayload {
   /** Newest comment createdAt included (pass back as `since`). */
   cursor: string | null;
-  /** Human-authored thread roots/replies the agent has not seen yet. */
+  /** Targeted human Ask roots/replies the agent has not seen yet. */
   comments: Comment[];
 }
 

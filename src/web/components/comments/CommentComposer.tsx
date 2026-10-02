@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import type { CommentDelivery } from '../../../shared/types.js';
 import { Button, cx, inputClass } from '../primitives.js';
 
 export interface ComposerState {
@@ -8,6 +9,14 @@ export interface ComposerState {
   quote: string | null;
   line: number | null;
   lineEnd: number | null;
+  boundaryTop?: number;
+}
+
+export interface CommentDeliveryUI {
+  canAsk: boolean;
+  reviewId?: string;
+  decisionLabel: string;
+  deliveryNote: string;
 }
 
 /**
@@ -17,26 +26,30 @@ export interface ComposerState {
 export function CommentComposer({
   state,
   placeholder,
-  submitLabel = 'Comment',
+  deliveryUI,
   onSubmit,
   onCancel,
 }: {
   state: ComposerState;
   placeholder?: string;
-  submitLabel?: string;
-  onSubmit: (body: string) => Promise<void>;
+  deliveryUI: CommentDeliveryUI;
+  onSubmit: (body: string, delivery: CommentDelivery) => Promise<void>;
   onCancel: () => void;
 }) {
   const [body, setBody] = useState('');
-  const [submitting, setSubmitting] = useState(false);
+  const [submittingDelivery, setSubmittingDelivery] = useState<CommentDelivery | null>(null);
   const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const deliveryNoteId = useId();
+  const errorId = useId();
   /** Measured position; null until the panel has been laid out once. */
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  const posRef = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
-    ref.current?.focus();
+    const frame = requestAnimationFrame(() => ref.current?.focus());
+    return () => cancelAnimationFrame(frame);
   }, []);
 
   useEffect(() => {
@@ -47,17 +60,17 @@ export function CommentComposer({
     return () => window.removeEventListener('keydown', onKey);
   }, [onCancel]);
 
-  const canSubmit = body.trim().length > 0 && !submitting;
+  const canSubmit = body.trim().length > 0 && submittingDelivery == null;
 
-  const submit = async (): Promise<void> => {
+  const submit = async (delivery: CommentDelivery): Promise<void> => {
     if (!canSubmit) return;
-    setSubmitting(true);
+    setSubmittingDelivery(delivery);
     setError(null);
     try {
-      await onSubmit(body.trim());
+      await onSubmit(body.trim(), delivery);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to add comment');
-      setSubmitting(false);
+      setSubmittingDelivery(null);
     }
   };
 
@@ -66,20 +79,40 @@ export function CommentComposer({
   // edge on narrow windows and fit only by luck vertically (a two-line quote grows
   // the header). Re-clamped on resize too.
   useLayoutEffect(() => {
+    const el = panelRef.current;
+    if (!el) return;
     const place = (): void => {
-      const el = panelRef.current;
-      if (!el) return;
       const { width, height } = el.getBoundingClientRect();
       const pad = 12;
-      setPos({
+      const minY = Math.max(pad, state.boundaryTop ?? 0);
+      const next = {
         x: Math.min(Math.max(pad, state.x), Math.max(pad, window.innerWidth - width - pad)),
-        y: Math.min(Math.max(pad, state.y), Math.max(pad, window.innerHeight - height - pad)),
-      });
+        y: Math.min(Math.max(minY, state.y), Math.max(minY, window.innerHeight - height - pad)),
+      };
+      const current = posRef.current;
+      if (current?.x === next.x && current.y === next.y) return;
+      posRef.current = next;
+      setPos(next);
     };
     place();
+    const observer = new ResizeObserver(place);
+    observer.observe(el);
     window.addEventListener('resize', place);
-    return () => window.removeEventListener('resize', place);
-  }, [state.x, state.y, state.quote]);
+    window.addEventListener('scroll', place, true);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+    };
+  }, [
+    state.x,
+    state.y,
+    state.quote,
+    state.boundaryTop,
+    deliveryUI.canAsk,
+    deliveryUI.decisionLabel,
+    deliveryUI.deliveryNote,
+  ]);
 
   return (
     <div
@@ -106,23 +139,59 @@ export function CommentComposer({
           value={body}
           onChange={(e) => setBody(e.target.value)}
           onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') void submit();
+            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+              e.preventDefault();
+              void submit('decision');
+            }
           }}
+          aria-describedby={
+            [deliveryUI.deliveryNote ? deliveryNoteId : null, error ? errorId : null]
+              .filter(Boolean)
+              .join(' ') || undefined
+          }
+          aria-invalid={error != null}
+          aria-keyshortcuts="Meta+Enter Control+Enter"
           rows={3}
           placeholder={placeholder ?? 'Leave a comment…'}
           className={cx(inputClass, 'resize-none leading-relaxed')}
         />
-        {error && <p className="mt-1 px-1 text-[12px] text-danger">{error}</p>}
-        <div className="mt-2 flex items-center justify-between">
-          <span className="text-[11px] text-ink-faint">⌘⏎ to submit</span>
-          <div className="flex gap-1.5">
-            <Button size="sm" variant="ghost" onClick={onCancel}>
-              Cancel
+        {deliveryUI.deliveryNote && (
+          <p id={deliveryNoteId} className="mt-1.5 px-1 text-[11px] leading-relaxed text-ink-faint">
+            {deliveryUI.deliveryNote}
+          </p>
+        )}
+        {error && (
+          <p id={errorId} role="alert" className="mt-1 px-1 text-[12px] text-danger">
+            {error}
+          </p>
+        )}
+        <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5">
+          <span className="mr-auto text-[11px] text-ink-faint">⌘/Ctrl ↵ safe submit</span>
+          <Button type="button" size="sm" variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+          {deliveryUI.canAsk && (
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              disabled={!canSubmit}
+              loading={submittingDelivery === 'ask'}
+              onClick={() => void submit('ask')}
+            >
+              Ask agent
             </Button>
-            <Button size="sm" variant="primary" disabled={!canSubmit} loading={submitting} onClick={() => void submit()}>
-              {submitLabel}
-            </Button>
-          </div>
+          )}
+          <Button
+            type="button"
+            size="sm"
+            variant="primary"
+            disabled={!canSubmit}
+            loading={submittingDelivery === 'decision'}
+            onClick={() => void submit('decision')}
+          >
+            {deliveryUI.decisionLabel}
+          </Button>
         </div>
       </div>
     </div>

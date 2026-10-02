@@ -4,10 +4,14 @@
  * it via `parentId`; replies inherit the root's anchor.
  */
 
-import type { Comment, CommentThreadView } from './types.js';
+import type { Comment, CommentDelivery, CommentThreadView } from './types.js';
 
 export function isThreadRoot(c: Comment): boolean {
   return c.parentId == null;
+}
+
+export function commentDelivery(c: Comment): CommentDelivery {
+  return c.delivery ?? 'decision';
 }
 
 /** Group comments into threads, oldest root first and replies oldest first. */

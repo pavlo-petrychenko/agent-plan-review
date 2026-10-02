@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import path from 'node:path';
+import type { CreateCommentInput } from '../../shared/types.js';
 import type { PlanReviewStore } from '../store/store.js';
 import { APP_VERSION } from '../config.js';
 import { gistReadiness, saveGist, GistError } from '../channels/gist.js';
@@ -271,9 +272,7 @@ export function createApiRouter(store: PlanReviewStore): Router {
     const body = typeof req.body?.body === 'string' ? req.body.body.trim() : '';
     if (!commentId) throw badRequest('commentId is required');
     if (!body) throw badRequest('body is required');
-    // Reply where the thread lives: it may have been carried onto this version
-    // (same id) or still sit on the version it was written on.
-    const { comment } = await store.replyToThread(review.projectKey, review.version, commentId, body);
+    const { comment } = await store.replyToReview(review.id, commentId, body);
     res.status(201).json(comment);
   }));
 
@@ -284,17 +283,12 @@ export function createApiRouter(store: PlanReviewStore): Router {
 // helpers
 // -----------------------------------------------------------------------------
 
-function validateCommentBody(body: unknown): {
-  doc?: string;
-  line?: number | null;
-  lineEnd?: number | null;
-  quote?: string | null;
-  body: string;
-  side?: 'old' | 'new';
-  baseVersion?: number;
-} {
+function validateCommentBody(body: unknown): CreateCommentInput {
   const b = body as Record<string, unknown>;
   if (typeof b?.body !== 'string' || !b.body.trim()) throw badRequest('Comment body is required');
+  if (b.delivery != null && b.delivery !== 'ask' && b.delivery !== 'decision') {
+    throw badRequest('delivery must be "ask" or "decision"');
+  }
   const line = b.line == null ? null : Number(b.line);
   const lineEnd = b.lineEnd == null ? null : Number(b.lineEnd);
   for (const [label, v] of [['line', line], ['lineEnd', lineEnd]] as const) {
@@ -317,6 +311,8 @@ function validateCommentBody(body: unknown): {
     lineEnd,
     quote: typeof b.quote === 'string' ? b.quote : null,
     body: b.body,
+    delivery: b.delivery === 'ask' || b.delivery === 'decision' ? b.delivery : undefined,
+    reviewId: typeof b.reviewId === 'string' && b.reviewId ? b.reviewId : undefined,
     side,
     baseVersion,
   };

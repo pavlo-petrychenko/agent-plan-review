@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { BulkDeleteResponse, ProjectDetail, ProjectSummary } from '../../../shared/types.js';
-import { invalidate, useApi } from '../../api/cache.js';
+import { refresh as refreshCache, useApi } from '../../api/cache.js';
 import { endpoints, keys } from '../../api/endpoints.js';
 import { Button, EmptyState, ErrorNote, Modal, Pill, Select, Spinner } from '../primitives.js';
 import { IconAlert, IconFolder, IconTrash } from '../icons.js';
@@ -34,7 +34,7 @@ export function ManageModal({ open, onClose, onChanged }: ManageModalProps) {
   const [forceProjectKey, setForceProjectKey] = useState<string | null>(null);
 
   const refresh = (): void => {
-    invalidate('projects', 'project:', 'version:', 'doc:', 'comments:', 'storage:', 'review:', 'diff:');
+    refreshCache('projects', 'project:', 'version:', 'doc:', 'comments:', 'storage:', 'review:', 'diff:');
     onChanged();
   };
 

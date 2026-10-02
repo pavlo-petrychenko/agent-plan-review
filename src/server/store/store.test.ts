@@ -69,7 +69,10 @@ test('a plan submitted from a subdirectory joins the repo project', async () => 
   assert.equal(second.version, 2);
 
   const detail = await store.getProjectDetail(first.projectKey);
-  assert.ok(!detail.meta.cwd.includes(`packages${path.sep}thing`), `cwd should be folded, got ${detail.meta.cwd}`);
+  assert.ok(
+    !detail.meta.cwd.includes(`packages${path.sep}thing`),
+    `cwd should be folded, got ${detail.meta.cwd}`,
+  );
 
   // The raw path survives on the review so gates can still match the session.
   const review = await store.getReview(second.reviewId);
@@ -222,9 +225,15 @@ test('a partial move keeps the source project alive', async () => {
   assert.deepEqual(res.moved, [{ from: 2, to: 2 }]);
   assert.equal(res.sourceRemoved, false);
   const leftover = await store.getProjectDetail(srcKey);
-  assert.deepEqual(leftover.versions.map((v) => v.n), [1]);
+  assert.deepEqual(
+    leftover.versions.map((v) => v.n),
+    [1],
+  );
   assert.equal(leftover.meta.currentVersion, 1);
-  assert.deepEqual((await store.getProjectDetail(b1.projectKey)).versions.map((v) => v.n), [1, 2]);
+  assert.deepEqual(
+    (await store.getProjectDetail(b1.projectKey)).versions.map((v) => v.n),
+    [1, 2],
+  );
 });
 
 test('moving a project into itself is rejected', async () => {
@@ -234,22 +243,261 @@ test('moving a project into itself is rejected', async () => {
   await assert.rejects(() => store.moveVersions(plan.projectKey, plan.projectKey), /same/);
 });
 
-test('review messages hand the agent human comments once, tracking a cursor', async () => {
+test('review messages deliver only targeted Ask comments once, tracking a monotonic cursor', async () => {
   const store = makeStore();
   const cwd = makeDir('apr-msg-');
   const rec = await store.recordPlan({ cwd, origin: 'mcp', markdown: '# Plan\n\nbody' });
-  const first = await store.addComment(rec.projectKey, rec.version, { body: 'first', doc: 'root', line: 1 });
+  await store.comments.create(rec.projectKey, rec.version, { body: 'legacy' }, 'root');
+  await store.addComment(rec.projectKey, rec.version, { body: 'batched', doc: 'root', delivery: 'decision' });
+  assert.deepEqual((await store.getReviewMessages(rec.reviewId)).comments, []);
 
+  const first = await store.addComment(rec.projectKey, rec.version, {
+    body: 'first',
+    doc: 'root',
+    line: 1,
+    delivery: 'ask',
+    reviewId: rec.reviewId,
+  });
   const initial = await store.getReviewMessages(rec.reviewId);
-  assert.deepEqual(initial.comments.map((c) => c.body), ['first']);
+  assert.deepEqual(
+    initial.comments.map((c) => c.body),
+    ['first'],
+  );
   await store.markAgentCursor(rec.reviewId, initial.cursor);
+  await store.markAgentCursor(rec.reviewId, '2020-01-01T00:00:00.000Z');
+  assert.equal((await store.getReview(rec.reviewId))?.agentCursor, initial.cursor);
 
-  // The agent's own reply is conversation, not something to hand back.
   await store.addAgentReply(rec.projectKey, rec.version, first.id, 'answer');
   assert.equal((await store.getReviewMessages(rec.reviewId)).comments.length, 0);
 
-  await store.addComment(rec.projectKey, rec.version, { body: 'second', doc: 'root', line: 2 });
-  assert.deepEqual((await store.getReviewMessages(rec.reviewId)).comments.map((c) => c.body), ['second']);
+  const second = await store.addComment(rec.projectKey, rec.version, {
+    body: 'second',
+    doc: 'root',
+    line: 2,
+    delivery: 'ask',
+    reviewId: rec.reviewId,
+  });
+  await store.addComment(rec.projectKey, rec.version, {
+    body: 'later batch',
+    doc: 'root',
+    delivery: 'decision',
+  });
+  const next = await store.getReviewMessages(rec.reviewId);
+  assert.deepEqual(
+    next.comments.map((c) => c.body),
+    ['second'],
+  );
+  assert.equal(
+    next.cursor,
+    (await store.listComments(rec.projectKey, rec.version)).find((c) => c.body === 'second')?.createdAt,
+  );
+  await store.markAgentCursor(rec.reviewId, next.cursor);
+  await store.resolveComment(rec.projectKey, rec.version, second.id, true);
+  const afterResolve = await store.getReviewMessages(rec.reviewId);
+  assert.deepEqual(afterResolve.comments, []);
+  assert.equal(afterResolve.cursor, next.cursor);
+
+  const resolved = await store.addComment(rec.projectKey, rec.version, {
+    body: 'resolved before delivery',
+    doc: 'root',
+    delivery: 'ask',
+    reviewId: rec.reviewId,
+  });
+  await store.resolveComment(rec.projectKey, rec.version, resolved.id, true);
+  assert.deepEqual((await store.getReviewMessages(rec.reviewId)).comments, []);
+});
+
+test('Ask comments require the exact pending MCP review and only that thread can receive agent replies', async () => {
+  const store = makeStore();
+  const mcp = await store.recordPlan({
+    cwd: makeDir('apr-ask-mcp-'),
+    origin: 'mcp',
+    markdown: '# MCP\n\nbody',
+  });
+  const api = await store.recordPlan({
+    cwd: makeDir('apr-ask-api-'),
+    origin: 'api',
+    markdown: '# API\n\nbody',
+  });
+
+  await assert.rejects(
+    () => store.addComment(mcp.projectKey, mcp.version, { body: 'missing target', delivery: 'ask' }),
+    /reviewId is required/,
+  );
+  await assert.rejects(
+    () =>
+      store.addComment('wrong-project', mcp.version, {
+        body: 'wrong project',
+        delivery: 'ask',
+        reviewId: mcp.reviewId,
+      }),
+    /does not match/,
+  );
+  await assert.rejects(
+    () =>
+      store.addComment(mcp.projectKey, mcp.version + 1, {
+        body: 'wrong version',
+        delivery: 'ask',
+        reviewId: mcp.reviewId,
+      }),
+    /does not match/,
+  );
+  await assert.rejects(
+    () =>
+      store.addComment(api.projectKey, api.version, {
+        body: 'wrong origin',
+        delivery: 'ask',
+        reviewId: api.reviewId,
+      }),
+    /only available for MCP/,
+  );
+
+  const decision = await store.addComment(mcp.projectKey, mcp.version, {
+    body: 'wait for decision',
+    delivery: 'decision',
+  });
+  await assert.rejects(() => store.reviewReplyTarget(mcp.reviewId, decision.id), /not an Ask/);
+  const reply = await store.addComment(mcp.projectKey, mcp.version, {
+    body: 'first-level reply',
+    parentId: decision.id,
+    delivery: 'decision',
+  });
+  await assert.rejects(
+    () =>
+      store.addComment(mcp.projectKey, mcp.version, {
+        body: 'nested reply',
+        parentId: reply.id,
+        delivery: 'decision',
+      }),
+    /Thread not found/,
+  );
+  await store.resolveComment(mcp.projectKey, mcp.version, decision.id, true);
+  await assert.rejects(
+    () =>
+      store.addComment(mcp.projectKey, mcp.version, {
+        body: 'reply after resolve',
+        parentId: decision.id,
+        delivery: 'decision',
+      }),
+    /Reopen the thread/,
+  );
+
+  const ask = await store.addComment(mcp.projectKey, mcp.version, {
+    body: 'ask now',
+    delivery: 'ask',
+    reviewId: mcp.reviewId,
+  });
+  const target = await store.reviewReplyTarget(mcp.reviewId, ask.id);
+  assert.equal(target.review.id, mcp.reviewId);
+  assert.equal(target.version, mcp.version);
+
+  await store.decideReview(mcp.reviewId, 'approve');
+  await assert.rejects(
+    () =>
+      store.addComment(mcp.projectKey, mcp.version, {
+        body: 'too late',
+        delivery: 'ask',
+        reviewId: mcp.reviewId,
+      }),
+    /already approved/,
+  );
+  await assert.rejects(
+    () =>
+      store.addComment(mcp.projectKey, mcp.version, {
+        body: 'late decision note',
+        delivery: 'decision',
+        reviewId: mcp.reviewId,
+      }),
+    /already approved/,
+  );
+  await assert.rejects(() => store.reviewReplyTarget(mcp.reviewId, ask.id), /already approved/);
+});
+
+test('an Ask is delivered only to its targeted review when a version has multiple reviews', async () => {
+  const store = makeStore();
+  const cwd = makeDir('apr-ask-target-');
+  const first = await store.recordPlan({ cwd, origin: 'mcp', markdown: '# Same plan\n\nbody' });
+  const second = await store.recordPlan({ cwd, origin: 'mcp', markdown: '# Same plan\n\nbody' });
+  assert.equal(first.version, second.version);
+
+  await store.addComment(first.projectKey, first.version, {
+    body: 'for the second review only',
+    delivery: 'ask',
+    reviewId: second.reviewId,
+  });
+  assert.deepEqual((await store.getReviewMessages(first.reviewId)).comments, []);
+  assert.deepEqual(
+    (await store.getReviewMessages(second.reviewId)).comments.map((comment) => comment.body),
+    ['for the second review only'],
+  );
+});
+
+test('a reject summary joins the decision without waking the conversation', async () => {
+  const store = makeStore();
+  const cwd = makeDir('apr-summary-');
+  const rec = await store.recordPlan({ cwd, origin: 'mcp', markdown: '# Plan\n\nbody' });
+  const decision = await store.decideReview(rec.reviewId, 'reject', 'Focus on rollout safety');
+  assert.match(decision.review.reason ?? '', /Focus on rollout safety/);
+  const summary = (await store.listComments(rec.projectKey, rec.version)).find(
+    (c) => c.body === 'Focus on rollout safety',
+  );
+  assert.equal(summary?.delivery, 'decision');
+  assert.equal(summary?.decisionReviewId, rec.reviewId);
+  assert.deepEqual((await store.getReviewMessages(rec.reviewId)).comments, []);
+
+  const sameVersion = await store.recordPlan({ cwd, origin: 'mcp', markdown: '# Plan\n\nbody' });
+  assert.equal(sameVersion.version, rec.version);
+  const approval = await store.decideReview(sameVersion.reviewId, 'approve');
+  assert.doesNotMatch(approval.review.notes ?? '', /Focus on rollout safety/);
+
+  const nextVersion = await store.recordPlan({ cwd, origin: 'mcp', markdown: '# Revised\n\nbody' });
+  assert.equal(
+    (await store.listComments(nextVersion.projectKey, nextVersion.version)).some(
+      (comment) => comment.body === 'Focus on rollout safety',
+    ),
+    false,
+  );
+});
+
+test('concurrent comment writes preserve every message', async () => {
+  const store = makeStore();
+  const rec = await store.recordPlan({
+    cwd: makeDir('apr-writes-'),
+    origin: 'mcp',
+    markdown: '# Plan\n\nbody',
+  });
+  await Promise.all(
+    Array.from({ length: 20 }, (_, index) =>
+      store.addComment(rec.projectKey, rec.version, { body: `comment-${index}`, delivery: 'decision' }),
+    ),
+  );
+  const bodies = (await store.listComments(rec.projectKey, rec.version)).map((comment) => comment.body);
+  assert.equal(bodies.length, 20);
+  assert.equal(new Set(bodies).size, 20);
+});
+
+test('Ask creation and a simultaneous decision are serialized without losing accepted feedback', async () => {
+  const store = makeStore();
+  const rec = await store.recordPlan({
+    cwd: makeDir('apr-race-'),
+    origin: 'mcp',
+    markdown: '# Plan\n\nbody',
+  });
+  const ask = store.addComment(rec.projectKey, rec.version, {
+    body: 'race-safe ask',
+    delivery: 'ask',
+    reviewId: rec.reviewId,
+  });
+  const decision = store.decideReview(rec.reviewId, 'approve');
+  const [askResult, decisionResult] = await Promise.allSettled([ask, decision]);
+  assert.equal(decisionResult.status, 'fulfilled');
+  const review = await store.getReview(rec.reviewId);
+  assert.equal(review?.status, 'approved');
+  if (askResult.status === 'fulfilled') {
+    assert.match(review?.notes ?? '', /race-safe ask/);
+  } else {
+    assert.match(String(askResult.reason), /already approved/);
+  }
 });
 
 test('open threads carry forward to the new version, re-anchored; resolved ones stay behind', async () => {
@@ -260,7 +508,12 @@ test('open threads carry forward to the new version, re-anchored; resolved ones 
     origin: 'mcp',
     markdown: '# Plan\n\nalpha\n\nbeta\n\ngamma',
   });
-  const root = await store.addComment(v1.projectKey, 1, { body: 'why alpha?', doc: 'root', line: 3, quote: 'alpha' });
+  const root = await store.addComment(v1.projectKey, 1, {
+    body: 'why alpha?',
+    doc: 'root',
+    line: 3,
+    quote: 'alpha',
+  });
   const settled = await store.addComment(v1.projectKey, 1, { body: 'settled', doc: 'root', line: 5 });
   await store.resolveComment(v1.projectKey, 1, settled.id, true);
   await store.addAgentReply(v1.projectKey, 1, root.id, 'because reasons');
@@ -284,7 +537,7 @@ test('open threads carry forward to the new version, re-anchored; resolved ones 
   assert.equal(replies[0].line, 5);
 });
 
-test('removed-line threads carry forward, re-anchor onto the new side, and stay answerable', async () => {
+test('removed-line threads carry forward, re-anchor, and preserve the original Ask target', async () => {
   const store = makeStore();
   const cwd = makeDir('apr-carry-old-');
   const v1 = await store.recordPlan({
@@ -300,6 +553,8 @@ test('removed-line threads carry forward, re-anchor onto the new side, and stay 
     side: 'old',
     baseVersion: 1,
     quote: 'beta',
+    delivery: 'ask',
+    reviewId: v1.reviewId,
   });
 
   const v2 = await store.recordPlan({
@@ -311,33 +566,16 @@ test('removed-line threads carry forward, re-anchor onto the new side, and stay 
   const carried = await store.listComments(v2.projectKey, 2);
   const roots = carried.filter((c) => c.parentId == null);
   assert.equal(roots.length, 1, 'the removed-line thread travels to the new version');
-  assert.equal(roots[0].id, ask.id, 'and keeps its id, so replies resolve');
+  assert.equal(roots[0].id, ask.id, 'and keeps its thread identity');
   assert.equal(roots[0].line, 5, 're-anchored onto the rewritten line itself');
   assert.equal(roots[0].side, undefined, 'no longer framed as a removed-line anchor');
   assert.equal(roots[0].baseVersion, undefined);
   assert.equal(roots[0].quote, 'beta', 'the quoted text still says what was being discussed');
-
-  // The agent can answer it: the reply lands on the version the human is reading.
-  const { comment, version } = await store.replyToThread(v2.projectKey, 2, ask.id, 'because reasons');
-  assert.equal(version, 2);
-  assert.equal(comment.parentId, ask.id);
-  assert.equal(comment.line, 5);
-  assert.equal((await store.listComments(v2.projectKey, 2)).length, 2);
-});
-
-test('replyToThread finds threads that stayed on an older version', async () => {
-  const store = makeStore();
-  const cwd = makeDir('apr-reply-old-');
-  const v1 = await store.recordPlan({ cwd, origin: 'mcp', markdown: '# Plan\n\nalpha\n\nbeta' });
-  const root = await store.addComment(v1.projectKey, 1, { body: 'about alpha', doc: 'root', line: 3 });
-  await store.resolveComment(v1.projectKey, 1, root.id, true); // resolved => not carried
-  const v2 = await store.recordPlan({ cwd, origin: 'mcp', markdown: '# Plan\n\nalpha\n\nbeta\n\ngamma' });
-  assert.equal((await store.listComments(v2.projectKey, 2)).length, 0, 'resolved threads stay behind');
-
-  // Answering it must not blow up with "Thread not found".
-  const { version } = await store.replyToThread(v2.projectKey, 2, root.id, 'closing the loop');
-  assert.equal(version, 1, 'routed to the version that actually owns the thread');
-  assert.equal((await store.listComments(v1.projectKey, 1)).length, 2);
+  assert.equal(roots[0].delivery, 'ask');
+  assert.equal(roots[0].wakeReviewId, v1.reviewId, 'the original review can still answer the carried thread');
+  const reply = await store.replyToReview(v1.reviewId, ask.id, 'because reasons');
+  assert.equal(reply.version, 2);
+  assert.equal(reply.comment.parentId, ask.id);
 });
 
 test('plan images are stored, image:NAME is rewritten, and a dangling ref fails the plan', async () => {
@@ -350,7 +588,8 @@ test('plan images are stored, image:NAME is rewritten, and a dangling ref fails 
   const result = await store.recordPlan({
     cwd,
     origin: 'mcp',
-    markdown: '# Fixes\n\nbefore:\n\n![before the fix](image:before)\n\nafter:\n\n![after the fix](image:after)',
+    markdown:
+      '# Fixes\n\nbefore:\n\n![before the fix](image:before)\n\nafter:\n\n![after the fix](image:after)',
     images: [
       { name: 'before', dataBase64: png.toString('base64') },
       { name: 'after', dataBase64: png.toString('base64') },

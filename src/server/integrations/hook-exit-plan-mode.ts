@@ -17,7 +17,7 @@ import { loadConfig, reviewTimeoutSeconds } from '../config.js';
 import { PlanReviewStore } from '../store/store.js';
 import { PlanValidationError } from '../util/errors.js';
 import { compileIssues } from '../../shared/compile.js';
-import type { Manifest, Review } from '../../shared/types.js';
+import type { Review } from '../../shared/types.js';
 import { readStdinJson, finish, type PreToolUseInput } from './hook-io.js';
 import { ensureServerRunning } from './spawn-server.js';
 import { waitForDecision } from './poll.js';
@@ -64,11 +64,7 @@ export async function runExitPlanModeHook(): Promise<void> {
     if (!decided || decided.status === 'pending') return finish({}); // timeout ⇒ fail-open
 
     if (decided.status === 'approved') {
-      const comments = await store.listComments(decided.projectKey, decided.version);
-      const manifest = (await store.getManifest(decided.projectKey, decided.version)) ?? undefined;
-      const { compileApproval } = await import('../../shared/compile.js');
-      const notes = compileApproval(comments, manifest as Manifest | undefined, () => null);
-      return finish(allow(input.tool_input ?? {}, notes || undefined));
+      return finish(allow(input.tool_input ?? {}, decided.notes || undefined));
     }
 
     const reason = decided.reason ?? 'The human requested changes via the review UI.';

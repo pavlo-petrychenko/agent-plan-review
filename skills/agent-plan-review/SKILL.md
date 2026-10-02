@@ -52,25 +52,27 @@ Give the human a real review surface for your plans instead of a terminal yes/no
      revised plan with `plan_review_submit`. It becomes the next version and the
      human can diff the two — the diff shows every page at once, and comments may
      target removed lines too (they arrive as `[removed in vN, lines X-Y]`).
-   - `status: "pending"` **with `newComments`** → the human wrote to a comment
-     thread. This is a DISCUSSION, not a change request: answer each one with
-     `plan_review_reply { "reviewId", "commentId": "<threadId>", "body" }`, then
+   - `status: "pending"` **with `newComments`** → the human chose Ask agent on a
+     comment thread. This is a DISCUSSION, not a change request: answer each one
+     with `plan_review_reply { "reviewId", "commentId": "<threadId>", "body" }`, then
      call `plan_review_check` again. The server tracks what you have seen, so you
      will not be handed the same message twice. Only revise and re-submit the plan
      if the discussion actually calls for a change.
+   - Comments the human adds to the decision batch do not wake you. They arrive
+     only in the final approved notes or requested-changes feedback.
 
 NEVER short-poll (short waits in a loop) and NEVER re-submit while a review is
 pending — both waste tokens for zero information.
 
 ## Threads (questions, not just change requests)
 
-Comments are conversation threads. The human may ask a question on a line, or
-reply to one of your comments; you can answer with `plan_review_reply`. Threads
-are not always change requests — answer questions, explain trade-offs, ask for
-clarification. A thread is compiled into your decision feedback until the human
-marks it resolved, so an unanswered question keeps coming back; a resolved one
-drops out. Threads carry forward to the next version, re-anchored, so the
-conversation stays visible on the revised plan.
+Comments are conversation threads. The human may choose Ask agent for a question
+on a line, or reply to one of your comments; answer those with
+`plan_review_reply`. Decision-batch comments stay silent until the human decides.
+Threads are not always change requests — answer questions, explain trade-offs,
+and ask for clarification. A thread is compiled into decision feedback until the
+human marks it resolved; a resolved one drops out. Threads carry forward to the
+next version, re-anchored, so the conversation stays visible on the revised plan.
 
 - Reply with `plan_review_reply { "reviewId": "<id>", "commentId": "<threadId>", "body": "..." }`.
 - `threadId` comes from the `newComments` entries of `plan_review_check`.
@@ -83,11 +85,14 @@ For larger efforts, split the plan into pages inside one submission:
 
 ```markdown
 # Overview
+
 Root content…
 
 <!--doc slug=implementation title="Implementation" parent=root-->
+
 …
 <!--doc slug=risks title="Risks" parent=root-->
+
 …
 ```
 
@@ -100,6 +105,7 @@ Root content…
 - A single-document plan needs no markers at all.
 
 Invalid plans are rejected with an issue list — fix every issue and re-submit.
+
 ## Images
 
 Screenshots belong in the plan — a reviewer should see the before/after, not read about it.
@@ -130,7 +136,6 @@ plan_review_submit {
   paste, and `POST /api/images { dataBase64, name }` does the same over HTTP.
 - Images are served by the local server, so they render in the review UI but NOT in a
   gist export (those URLs are local to your machine).
-
 
 ## Claude Code
 

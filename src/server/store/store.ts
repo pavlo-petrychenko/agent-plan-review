@@ -26,9 +26,10 @@ import { VersionStore } from './versions.js';
 import { recordPlan, type RecordInput, type RecordOutput } from './record.js';
 import { compileApproval, compileRejection } from '../../shared/compile.js';
 import { actionableComments } from '../../shared/compile.js';
-import { latestCreatedAt } from '../../shared/threads.js';
+import { commentDelivery, groupThreads, latestCreatedAt } from '../../shared/threads.js';
 import { renderMarkdown } from '../render/markdown.js';
 import { conflict, notFound, badRequest } from '../util/errors.js';
+import { withFileLock } from '../util/fs.js';
 
 /**
  * Facade over the storage layer used by API routes and integrations.
@@ -52,6 +53,10 @@ export class PlanReviewStore {
   }
 
   recordPlan(input: RecordInput): Promise<RecordOutput> {
+    return this.coordinate(() => this.recordPlanUnlocked(input));
+  }
+
+  private recordPlanUnlocked(input: RecordInput): Promise<RecordOutput> {
     return recordPlan(this.layout, this.projects, this.reviews, this.config.port, input);
   }
 
@@ -96,7 +101,13 @@ export class PlanReviewStore {
       const meta = await this.versions.readMeta(key, n);
       if (!meta || meta.kind !== 'single' || slug !== 'root') throw notFound('Document');
       const markdown = (await this.versions.readMarkdown(key, n)) ?? '';
-      return { slug: 'root', title: 'Plan', parent: null, markdown, html: renderMarkdown(markdown, new Set(['root'])) };
+      return {
+        slug: 'root',
+        title: 'Plan',
+        parent: null,
+        markdown,
+        html: renderMarkdown(markdown, new Set(['root'])),
+      };
     }
     const docMeta = manifest.docs.find((d) => d.slug === slug);
     if (!docMeta) throw notFound('Document');
@@ -118,24 +129,68 @@ export class PlanReviewStore {
   async getReviewMessages(id: string, since?: string | null): Promise<ReviewMessagesPayload> {
     const review = await this.reviews.get(id);
     if (!review) throw notFound('Review');
-    const human = (await this.comments.list(review.projectKey, review.version)).filter(
-      (c) => c.author === 'me',
+    if (review.status !== 'pending') return { cursor: review.agentCursor ?? null, comments: [] };
+    const all = await this.comments.list(review.projectKey, review.version);
+    const resolvedRoots = new Set(all.filter((c) => c.parentId == null && c.resolved).map((c) => c.id));
+    const asks = all.filter(
+      (c) =>
+        c.author === 'me' &&
+        commentDelivery(c) === 'ask' &&
+        c.wakeReviewId === id &&
+        !resolvedRoots.has(c.parentId ?? c.id),
     );
     const cursor = since ?? review.agentCursor ?? null;
-    const comments = cursor ? human.filter((c) => c.createdAt > cursor) : human;
-    return { cursor: latestCreatedAt(human) ?? cursor, comments };
+    const comments = cursor ? asks.filter((c) => c.createdAt > cursor) : asks;
+    return { cursor: latestCreatedAt(comments) ?? cursor, comments };
   }
 
   /** Persist the conversation cursor after delivering messages to the agent. */
   async markAgentCursor(id: string, cursor: string | null): Promise<void> {
+    return this.coordinate(() => this.markAgentCursorUnlocked(id, cursor));
+  }
+
+  private async markAgentCursorUnlocked(id: string, cursor: string | null): Promise<void> {
     if (!cursor) return;
+    const review = await this.reviews.get(id);
+    if (!review) throw notFound('Review');
+    if (review.agentCursor != null && review.agentCursor >= cursor) return;
     await this.reviews.update(id, { agentCursor: cursor });
   }
 
   async addComment(key: string, n: number, input: CreateCommentInput): Promise<Comment> {
+    return this.coordinate(() => this.addCommentUnlocked(key, n, input));
+  }
+
+  private async addCommentUnlocked(key: string, n: number, input: CreateCommentInput): Promise<Comment> {
+    const delivery = input.delivery ?? 'decision';
+    if (delivery !== 'ask' && delivery !== 'decision')
+      throw badRequest('delivery must be "ask" or "decision"');
+    const targetReviewId = input.reviewId;
+    if (delivery === 'ask' && !targetReviewId) throw badRequest('reviewId is required for ask comments');
+    if (targetReviewId) {
+      const review = await this.reviews.get(targetReviewId);
+      if (!review) throw notFound('Review');
+      if (review.projectKey !== key || review.version !== n) {
+        throw badRequest(
+          delivery === 'ask'
+            ? 'Ask review does not match this project version'
+            : 'Review does not match this project version',
+        );
+      }
+      if (review.status !== 'pending') throw conflict({ error: `Review is already ${review.status}` });
+      if (delivery === 'ask' && review.origin !== 'mcp') {
+        throw badRequest('Ask is only available for MCP reviews');
+      }
+    }
     const manifest = await this.versions.readManifest(key, n);
     try {
-      return await this.comments.create(key, n, input, this.comments.defaultDoc(manifest ?? undefined), 'me');
+      return await this.comments.create(
+        key,
+        n,
+        { ...input, delivery, reviewId: delivery === 'ask' ? targetReviewId : undefined },
+        this.comments.defaultDoc(manifest ?? undefined),
+        'me',
+      );
     } catch (err) {
       throw mapParentError(err);
     }
@@ -143,6 +198,22 @@ export class PlanReviewStore {
 
   /** Agent reply into an existing thread (author is set server-side). */
   async addAgentReply(key: string, n: number, rootId: string, body: string): Promise<Comment> {
+    return this.coordinate(() => this.createAgentReply(key, n, rootId, body));
+  }
+
+  async replyToReview(
+    reviewId: string,
+    rootId: string,
+    body: string,
+  ): Promise<{ comment: Comment; version: number }> {
+    return this.coordinate(async () => {
+      const target = await this.reviewReplyTarget(reviewId, rootId);
+      const comment = await this.createAgentReply(target.review.projectKey, target.version, rootId, body);
+      return { comment, version: target.version };
+    });
+  }
+
+  private async createAgentReply(key: string, n: number, rootId: string, body: string): Promise<Comment> {
     const manifest = await this.versions.readManifest(key, n);
     try {
       return await this.comments.create(
@@ -155,6 +226,23 @@ export class PlanReviewStore {
     } catch (err) {
       throw mapParentError(err);
     }
+  }
+
+  async reviewReplyTarget(reviewId: string, rootId: string): Promise<{ review: Review; version: number }> {
+    const review = await this.reviews.get(reviewId);
+    if (!review) throw notFound('Review');
+    if (review.status !== 'pending') throw conflict({ error: `Review is already ${review.status}` });
+    const version = await this.findCommentVersion(review.projectKey, rootId);
+    if (version == null) throw notFound('Thread');
+    const comments = await this.comments.list(review.projectKey, version);
+    const thread = groupThreads(comments).find((candidate) => candidate.root.id === rootId);
+    if (!thread) throw badRequest('commentId must be a thread root');
+    const targetedAsk = [thread.root, ...thread.replies].some(
+      (comment) =>
+        comment.author === 'me' && commentDelivery(comment) === 'ask' && comment.wakeReviewId === review.id,
+    );
+    if (!targetedAsk) throw badRequest('Comment thread is not an Ask for this review');
+    return { review, version };
   }
 
   /**
@@ -173,30 +261,19 @@ export class PlanReviewStore {
     return null;
   }
 
-  /**
-   * Reply to a thread wherever it lives (see `findCommentVersion`). Carried
-   * threads keep their id, so this lands on the newest version that has it and
-   * the human — who is looking at that version — sees the answer.
-   */
-  async replyToThread(
-    key: string,
-    preferredVersion: number,
-    rootId: string,
-    body: string,
-  ): Promise<{ comment: Comment; version: number }> {
-    const version = (await this.findCommentVersion(key, rootId)) ?? preferredVersion;
-    return { comment: await this.addAgentReply(key, version, rootId, body), version };
-  }
-
   async resolveComment(key: string, n: number, commentId: string, resolved: boolean): Promise<Comment> {
-    const updated = await this.comments.setResolved(key, n, commentId, resolved);
-    if (!updated) throw notFound('Thread');
-    return updated;
+    return this.coordinate(async () => {
+      const updated = await this.comments.setResolved(key, n, commentId, resolved);
+      if (!updated) throw notFound('Thread');
+      return updated;
+    });
   }
 
   async deleteComment(key: string, n: number, commentId: string): Promise<void> {
-    const ok = await this.comments.remove(key, n, commentId);
-    if (!ok) throw notFound('Comment');
+    return this.coordinate(async () => {
+      const ok = await this.comments.remove(key, n, commentId);
+      if (!ok) throw notFound('Comment');
+    });
   }
 
   /**
@@ -275,39 +352,59 @@ export class PlanReviewStore {
    * Resolve a review. The compiled reason/notes are built here so every
    * integration path produces identical agent-facing feedback.
    */
-  async decideReview(id: string, decision: 'approve' | 'reject', summary?: string): Promise<DecisionResponse> {
+  async decideReview(
+    id: string,
+    decision: 'approve' | 'reject',
+    summary?: string,
+  ): Promise<DecisionResponse> {
+    return this.coordinate(() => this.decideReviewUnlocked(id, decision, summary));
+  }
+
+  private async decideReviewUnlocked(
+    id: string,
+    decision: 'approve' | 'reject',
+    summary?: string,
+  ): Promise<DecisionResponse> {
     const review = await this.reviews.get(id);
     if (!review) throw notFound('Review');
     if (review.status !== 'pending') throw conflict({ error: `Review is already ${review.status}` });
 
-    const comments = await this.comments.list(review.projectKey, review.version);
+    const storedComments = await this.comments.list(review.projectKey, review.version);
+    const feedbackComments = storedComments.filter(
+      (comment) => comment.decisionReviewId == null || comment.decisionReviewId === id,
+    );
     const manifest = (await this.versions.readManifest(review.projectKey, review.version)) ?? undefined;
     // Diff-anchored comments can point at a base version's removed lines, so
     // the resolver needs that version's text too.
     const baseVersions = [
       ...new Set(
-        comments.filter((c) => c.side === 'old' && c.baseVersion != null).map((c) => c.baseVersion!),
+        feedbackComments.filter((c) => c.side === 'old' && c.baseVersion != null).map((c) => c.baseVersion!),
       ),
     ];
     const resolve = await this.lineSliceResolver(review.projectKey, review.version, manifest, baseVersions);
 
     let payload: { notes?: string; reason?: string };
     if (decision === 'approve') {
-      payload = { notes: compileApproval(comments, manifest, resolve) || undefined };
+      payload = { notes: compileApproval(feedbackComments, manifest, resolve) || undefined };
     } else {
       // An optional human summary is stored as a general comment first so it
       // participates in compilation like any other note.
       if (summary?.trim()) {
-        const created = await this.comments.create(review.projectKey, review.version, { body: summary.trim() }, manifest?.root ?? 'root');
-        comments.push(created);
+        const created = await this.comments.create(
+          review.projectKey,
+          review.version,
+          { body: summary.trim(), delivery: 'decision', decisionReviewId: id },
+          manifest?.root ?? 'root',
+        );
+        feedbackComments.push(created);
       }
       const via = review.origin === 'hook' ? 'ExitPlanMode' : 'plan_review_submit';
-      payload = { reason: compileRejection(comments, manifest, resolve, review.version, via) };
+      payload = { reason: compileRejection(feedbackComments, manifest, resolve, review.version, via) };
     }
 
     const updated = await this.reviews.decide(id, decision, payload);
     if (!updated) throw conflict({ error: 'Review already resolved' });
-    return { review: updated, commentCount: actionableComments(comments).length };
+    return { review: updated, commentCount: actionableComments(feedbackComments).length };
   }
 
   private async lineSliceResolver(
@@ -352,7 +449,9 @@ export class PlanReviewStore {
     const versionMeta = await this.versions.readMeta(key, n);
     if (!versionMeta) throw notFound('Version');
 
-    const pending = (await this.reviews.list({ status: 'pending', projectKey: key })).filter((r) => r.version === n);
+    const pending = (await this.reviews.list({ status: 'pending', projectKey: key })).filter(
+      (r) => r.version === n,
+    );
     if (pending.length > 0 && !force) {
       throw conflict({ error: 'Version has pending reviews', pendingReviews: pending.length });
     }
@@ -374,7 +473,9 @@ export class PlanReviewStore {
     const deleted: number[] = [];
     const blocked: { n: number; pendingReviews: number }[] = [];
     for (const n of ns) {
-      const pending = (await this.reviews.list({ status: 'pending', projectKey: key })).filter((r) => r.version === n);
+      const pending = (await this.reviews.list({ status: 'pending', projectKey: key })).filter(
+        (r) => r.version === n,
+      );
       if (pending.length > 0 && !force) {
         blocked.push({ n, pendingReviews: pending.length });
         continue;
@@ -431,7 +532,9 @@ export class PlanReviewStore {
         hash: version.hash,
         createdAt: version.createdAt,
         markdown:
-          version.kind === 'single' ? ((await this.versions.readMarkdown(fromKey, version.n)) ?? '') : undefined,
+          version.kind === 'single'
+            ? ((await this.versions.readMarkdown(fromKey, version.n)) ?? '')
+            : undefined,
         manifest: manifest ?? undefined,
         docBodies,
       });
@@ -492,12 +595,19 @@ export class PlanReviewStore {
   }
 
   async pruneResolved(): Promise<void> {
-    await this.reviews.pruneResolved();
+    return this.coordinate(() => this.reviews.pruneResolved());
+  }
+
+  private coordinate<T>(fn: () => Promise<T>): Promise<T> {
+    return withFileLock(this.layout.reviewFile('__coordination__'), fn);
   }
 }
 
 /** A reply whose thread root is gone is a 404, not a 500. */
 function mapParentError(err: unknown): unknown {
   if (err instanceof Error && err.message === 'Parent comment not found') return notFound('Thread');
+  if (err instanceof Error && err.message === 'Parent thread is resolved') {
+    return badRequest('Reopen the thread before replying');
+  }
   return err;
 }

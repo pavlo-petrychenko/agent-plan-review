@@ -57,11 +57,18 @@ export const endpoints = {
   deleteComment: (key: string, n: number, id: string) =>
     api.del<{ ok: true }>(`/api/projects/${encodeURIComponent(key)}/versions/${n}/comments/${id}`),
 
-  replyToComment: (key: string, n: number, id: string, body: string) =>
-    api.post<Comment>(`/api/projects/${encodeURIComponent(key)}/versions/${n}/comments/${id}/replies`, { body }),
+  replyToComment: (
+    key: string,
+    n: number,
+    id: string,
+    input: Pick<CreateCommentInput, 'body' | 'delivery' | 'reviewId'>,
+  ) =>
+    api.post<Comment>(`/api/projects/${encodeURIComponent(key)}/versions/${n}/comments/${id}/replies`, input),
 
   resolveComment: (key: string, n: number, id: string, resolved: boolean) =>
-    api.post<Comment>(`/api/projects/${encodeURIComponent(key)}/versions/${n}/comments/${id}/resolve`, { resolved }),
+    api.post<Comment>(`/api/projects/${encodeURIComponent(key)}/versions/${n}/comments/${id}/resolve`, {
+      resolved,
+    }),
 
   getDiff: (key: string, from: number, to: number) =>
     api.get<DiffResponse>(`/api/projects/${encodeURIComponent(key)}/diff?from=${from}&to=${to}`),

@@ -1,8 +1,10 @@
-import { useState } from 'react';
-import type { Comment, CommentThreadView } from '../../../shared/types.js';
+import { useEffect, useId, useState } from 'react';
+import type { Comment, CommentDelivery, CommentThreadView } from '../../../shared/types.js';
+import { commentDelivery } from '../../../shared/threads.js';
 import { formatLineLabel } from '../../../shared/format.js';
-import { Button, cx, inputClass } from '../primitives.js';
+import { Button, Pill, cx, inputClass } from '../primitives.js';
 import { IconCheck, IconTrash } from '../icons.js';
+import type { CommentDeliveryUI } from './CommentComposer.js';
 
 function timeLabel(iso: string): string {
   const d = new Date(iso);
@@ -17,7 +19,8 @@ export interface CommentThreadProps {
   thread: CommentThreadView;
   onDelete: (id: string) => void;
   /** Post a human reply into the thread. */
-  onReply: (rootId: string, body: string) => Promise<void>;
+  onReply: (rootId: string, body: string, delivery: CommentDelivery) => Promise<void>;
+  deliveryUI: CommentDeliveryUI;
   /** Resolve/unresolve a thread (root only). */
   onResolve: (rootId: string, resolved: boolean) => void;
   /** Jump to the block this thread is anchored to. */
@@ -32,6 +35,7 @@ export function CommentThread({
   thread,
   onDelete,
   onReply,
+  deliveryUI,
   onResolve,
   onLocate,
   label,
@@ -39,6 +43,7 @@ export function CommentThread({
 }: CommentThreadProps) {
   const { root, replies } = thread;
   const resolved = root.resolved === true;
+  const agentReplied = replies.some((reply) => reply.author === 'agent');
   return (
     <div className={cx('my-3 flex flex-col gap-2', compact && 'my-2')}>
       <CommentCard
@@ -60,27 +65,52 @@ export function CommentThread({
       {resolved ? (
         <span className="self-start px-1.5 text-[11.5px] text-ink-faint">Reopen the thread to reply</span>
       ) : (
-        <ReplyBox onReply={(body) => onReply(root.id, body)} />
+        <>
+          {agentReplied && (
+            <p className="self-start px-1.5 text-[11.5px] text-ink-faint">
+              Agent replied. Resolve the thread to keep it out of the decision.
+            </p>
+          )}
+          <ReplyBox onReply={(body, delivery) => onReply(root.id, body, delivery)} deliveryUI={deliveryUI} />
+        </>
       )}
     </div>
   );
 }
 
 /** Collapsed "Reply…" affordance that expands into a small composer. */
-function ReplyBox({ onReply }: { onReply: (body: string) => Promise<void> }) {
+function ReplyBox({
+  onReply,
+  deliveryUI,
+}: {
+  onReply: (body: string, delivery: CommentDelivery) => Promise<void>;
+  deliveryUI: CommentDeliveryUI;
+}) {
   const [open, setOpen] = useState(false);
   const [body, setBody] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [submittingDelivery, setSubmittingDelivery] = useState<CommentDelivery | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const deliveryNoteId = useId();
+  const errorId = useId();
 
-  const submit = async (): Promise<void> => {
-    if (!body.trim() || busy) return;
-    setBusy(true);
+  useEffect(() => {
+    setOpen(false);
+    setBody('');
+    setError(null);
+  }, [deliveryUI.reviewId]);
+
+  const submit = async (delivery: CommentDelivery): Promise<void> => {
+    if (!body.trim() || submittingDelivery != null) return;
+    setSubmittingDelivery(delivery);
+    setError(null);
     try {
-      await onReply(body.trim());
+      await onReply(body.trim(), delivery);
       setBody('');
       setOpen(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to add reply');
     } finally {
-      setBusy(false);
+      setSubmittingDelivery(null);
     }
   };
 
@@ -103,17 +133,39 @@ function ReplyBox({ onReply }: { onReply: (body: string) => Promise<void> }) {
         value={body}
         onChange={(e) => setBody(e.target.value)}
         onKeyDown={(e) => {
-          if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') void submit();
+          if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+            e.preventDefault();
+            void submit('decision');
+          }
           if (e.key === 'Escape') {
             setOpen(false);
             setBody('');
           }
         }}
         placeholder="Reply…"
+        aria-describedby={
+          [deliveryUI.deliveryNote ? deliveryNoteId : null, error ? errorId : null]
+            .filter(Boolean)
+            .join(' ') || undefined
+        }
+        aria-invalid={error != null}
+        aria-keyshortcuts="Meta+Enter Control+Enter"
         className={cx(inputClass, 'resize-none leading-relaxed')}
       />
-      <div className="flex justify-end gap-1.5">
+      {deliveryUI.deliveryNote && (
+        <p id={deliveryNoteId} className="text-[11px] leading-relaxed text-ink-faint">
+          {deliveryUI.deliveryNote}
+        </p>
+      )}
+      {error && (
+        <p id={errorId} role="alert" className="text-[11.5px] text-danger">
+          {error}
+        </p>
+      )}
+      <div className="flex flex-wrap justify-end gap-1.5">
+        <span className="mr-auto self-center text-[10.5px] text-ink-faint">⌘/Ctrl ↵ safe submit</span>
         <Button
+          type="button"
           size="sm"
           variant="ghost"
           onClick={() => {
@@ -123,8 +175,27 @@ function ReplyBox({ onReply }: { onReply: (body: string) => Promise<void> }) {
         >
           Cancel
         </Button>
-        <Button size="sm" variant="primary" disabled={!body.trim()} loading={busy} onClick={() => void submit()}>
-          Reply
+        {deliveryUI.canAsk && (
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={!body.trim() || submittingDelivery != null}
+            loading={submittingDelivery === 'ask'}
+            onClick={() => void submit('ask')}
+          >
+            Ask agent
+          </Button>
+        )}
+        <Button
+          type="button"
+          size="sm"
+          variant="primary"
+          disabled={!body.trim() || submittingDelivery != null}
+          loading={submittingDelivery === 'decision'}
+          onClick={() => void submit('decision')}
+        >
+          {deliveryUI.decisionLabel}
         </Button>
       </div>
     </div>
@@ -158,6 +229,7 @@ export function CommentCard({
   const anchored = isRoot && comment.line != null;
   const anchorLabel = label ?? formatLineLabel(comment.line, comment.lineEnd);
   const agent = comment.author === 'agent';
+  const delivery = agent ? null : commentDelivery(comment);
   return (
     <div
       className={cx(
@@ -165,7 +237,7 @@ export function CommentCard({
         resolved && 'opacity-70',
       )}
     >
-      <div className="flex items-center gap-2 border-b border-border px-3.5 py-2">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border px-3.5 py-2">
         <span
           className={cx(
             'flex h-5 w-5 items-center justify-center rounded-full text-[9.5px] font-bold',
@@ -174,8 +246,13 @@ export function CommentCard({
         >
           {agent ? 'AI' : 'ME'}
         </span>
-        <span className="text-[12px] font-medium text-ink">{agent ? 'Claude' : 'me'}</span>
+        <span className="text-[12px] font-medium text-ink">{agent ? 'Agent' : 'You'}</span>
         <span className="text-[11.5px] text-ink-faint">{timeLabel(comment.createdAt)}</span>
+        {delivery && (
+          <Pill tone={delivery === 'ask' ? 'accent' : 'neutral'} className="px-1.5 py-0 text-[10px]">
+            {delivery === 'ask' ? 'Ask agent' : 'Decision batch'}
+          </Pill>
+        )}
         {anchored &&
           (onLocate ? (
             <button

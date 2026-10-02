@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { actionableMessage, groupThreads, isOpenThread, latestCreatedAt } from './threads.js';
+import { actionableMessage, commentDelivery, groupThreads, isOpenThread, latestCreatedAt } from './threads.js';
 import type { Comment } from './types.js';
 
 const c = (over: Partial<Comment>): Comment => ({
@@ -43,6 +43,12 @@ test('actionableMessage is the newest human message in the thread', () => {
 test('isOpenThread reflects the resolved flag on the root', () => {
   assert.equal(isOpenThread({ root: c({ id: 'r1' }), replies: [] }), true);
   assert.equal(isOpenThread({ root: c({ id: 'r1', resolved: true }), replies: [] }), false);
+});
+
+test('legacy human comments default to decision delivery', () => {
+  assert.equal(commentDelivery(c({})), 'decision');
+  assert.equal(commentDelivery(c({ delivery: 'ask' })), 'ask');
+  assert.equal(commentDelivery(c({ delivery: 'decision' })), 'decision');
 });
 
 test('latestCreatedAt picks the newest, or null when empty', () => {
