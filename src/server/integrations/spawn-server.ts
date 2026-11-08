@@ -67,7 +67,7 @@ export async function ensureServerRunning(): Promise<number> {
   throw new ServerStartError(`agent-plan-review server did not become healthy on port ${cfg.port}`);
 }
 
-function cliEntryPath(): string {
+export function cliEntryPath(): string {
   // Built: dist/server/integrations/spawn-server.js → dist/server/cli.js
   // Dev:   src/server/integrations/spawn-server.ts → src/server/cli.ts (tsx)
   const here = import.meta.url;

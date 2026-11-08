@@ -20,7 +20,9 @@
 
 import os from 'node:os';
 import path from 'node:path';
-import { appConfigPath, herdrSettings, setHerdrSettings, type ServerConfig } from '../config.js';
+import fs from 'node:fs';
+import { DEFAULT_PORT, appConfigPath, herdrSettings, setHerdrSettings, type ServerConfig } from '../config.js';
+import { installHerdrMod, modTarget, uninstallHerdrMod, type StartCommand } from './herdr-install.js';
 import type { Review, ReviewAgent } from '../../shared/types.js';
 import type { ReviewStore } from '../store/reviews.js';
 import type { VersionStore } from '../store/versions.js';
@@ -37,6 +39,11 @@ export interface HerdrPointer {
   title: string;
   cwd: string;
   updatedAt: string;
+  /**
+   * Base URL of the review server that owns this review (`http://127.0.0.1:<port>`),
+   * so the mod talks to the right instance (an isolated store on another port too).
+   */
+  server: string;
 }
 
 /** Which reviews a store mutation may have changed. */
@@ -119,7 +126,7 @@ export async function syncHerdrPointers(
         if (!file) continue;
         const [newest] = await deps.reviews.list({ terminal });
         if (!newest) continue;
-        await writeJson(file, await buildPointer(deps.versions, newest));
+        await writeJson(file, await buildPointer(deps.versions, newest, deps.config.port));
       } catch (err) {
         console.error(`[plan-review herdr] pointer write failed for terminal ${terminal}:`, err);
       }
@@ -129,8 +136,11 @@ export async function syncHerdrPointers(
   }
 }
 
+const HERDR_USAGE =
+  'Usage: agent-plan-review herdr <enable [--browser] | disable | status | install [--link] | uninstall>';
+
 /**
- * `agent-plan-review herdr <enable [--browser] | disable | status>`.
+ * `agent-plan-review herdr <enable [--browser] | disable | status | install | uninstall>`.
  * Returns the process exit code; output goes through `out`.
  */
 export function runHerdrCommand(
@@ -138,14 +148,48 @@ export function runHerdrCommand(
   home: string,
   out: (line: string) => void,
   env: NodeJS.ProcessEnv = process.env,
+  opts: { port?: number; source?: string; start?: StartCommand } = {},
 ): number {
   const [sub, ...flags] = args;
+  if (sub === 'install') {
+    try {
+      const r = installHerdrMod({
+        herdrHome: herdrHome(env),
+        home,
+        port: opts.port ?? DEFAULT_PORT,
+        source: opts.source,
+        start: opts.start,
+        link: flags.includes('--link'),
+      });
+      out(
+        r.mode === 'link'
+          ? `Linked the plan-review mod: ${r.target} (Herdr shows no icons through a symlink; use a copy for real use)`
+          : `Installed the plan-review mod: ${r.target} (${r.copied} file${r.copied === 1 ? '' : 's'} updated${r.removed ? `, ${r.removed} removed` : ''})`,
+      );
+      if (!herdrSettings(home, env).enabled) {
+        out('The Herdr integration is off: run `agent-plan-review herdr enable` so plans reach the mod.');
+      }
+      return 0;
+    } catch (err) {
+      out(`Install failed: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+  }
+  if (sub === 'uninstall') {
+    try {
+      out(uninstallHerdrMod(herdrHome(env)) ? `Removed ${modTarget(herdrHome(env))}` : 'The plan-review mod is not installed.');
+      return 0;
+    } catch (err) {
+      out(`Uninstall failed: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+  }
   if (sub === 'enable') {
     setHerdrSettings(home, { enabled: true, openBrowser: flags.includes('--browser') });
   } else if (sub === 'disable') {
     setHerdrSettings(home, { enabled: false, openBrowser: false });
   } else if (sub !== 'status') {
-    out('Usage: agent-plan-review herdr <enable [--browser] | disable | status>');
+    out(HERDR_USAGE);
     return 1;
   }
   const effective = herdrSettings(home, env);
@@ -153,13 +197,15 @@ export function runHerdrCommand(
   out(`  browser for Herdr terminals: ${effective.enabled && !effective.openBrowser ? 'skipped' : 'opened'}`);
   out(`  config: ${appConfigPath(home)}`);
   out(`  pointer files: ${herdrPointerDir(env)}`);
+  const mod = modTarget(herdrHome(env));
+  out(`  mod: ${fs.existsSync(mod) ? mod : 'not installed (agent-plan-review herdr install)'}`);
   const override = env.AGENT_PLAN_REVIEW_HERDR?.trim();
   if (override === '0' || override === '1')
     out(`  (AGENT_PLAN_REVIEW_HERDR=${override} overrides the config file)`);
   return 0;
 }
 
-async function buildPointer(versions: VersionStore, review: Review): Promise<HerdrPointer> {
+async function buildPointer(versions: VersionStore, review: Review, port: number): Promise<HerdrPointer> {
   return {
     reviewId: review.id,
     projectKey: review.projectKey,
@@ -168,6 +214,7 @@ async function buildPointer(versions: VersionStore, review: Review): Promise<Her
     title: await rootTitle(versions, review.projectKey, review.version),
     cwd: review.cwd,
     updatedAt: new Date().toISOString(),
+    server: `http://127.0.0.1:${port}`,
   };
 }
 

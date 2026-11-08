@@ -9,7 +9,7 @@
  *   agent-plan-review forget --worktree <path>  delete the plans of a removed worktree
  *   agent-plan-review install-skill      install the global agent skill
  *   agent-plan-review install-pi-extension  install the plan-review-wake pi extension
- *   agent-plan-review herdr enable|disable|status  optional Herdr integration
+ *   agent-plan-review herdr enable|disable|status|install|uninstall  optional Herdr integration
  */
 
 import fs from 'node:fs';
@@ -48,6 +48,9 @@ Commands:
                            Herdr mod; --browser keeps opening the browser too)
   herdr disable            Turn the Herdr integration off (the default)
   herdr status             Show the effective Herdr settings
+  herdr install [--link]   Copy the plan-review mod into Herdr (<HERDR_APP_HOME>/mods/plan-review);
+                           run again after upgrading. --link symlinks it instead (development)
+  herdr uninstall          Remove the plan-review mod from Herdr
   forget --worktree <path> [--dry-run] [--json]
                            Delete a worktree's plans (versions, comments, reviews), images
                            no other project uses, and Herdr pointer files. Works after the
@@ -111,8 +114,12 @@ switch (command) {
     void runEnterPlanModeHook();
     break;
   case 'herdr': {
-    const code = runHerdrCommand(process.argv.slice(3), cfg.home, (line) =>
-      process.stdout.write(`${line}\n`),
+    const code = runHerdrCommand(
+      process.argv.slice(3),
+      cfg.home,
+      (line) => process.stdout.write(`${line}\n`),
+      process.env,
+      { port: cfg.port },
     );
     process.exit(code);
     break;

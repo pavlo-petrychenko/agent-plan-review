@@ -125,6 +125,7 @@ test('enabled: submit, Ask, agent reply, resolve and decision each refresh the p
       title: 'Ship it',
       cwd: (await store.getReview(recorded.reviewId))!.cwd,
       updatedAt: undefined,
+      server: 'http://127.0.0.1:4999',
     },
   );
 
