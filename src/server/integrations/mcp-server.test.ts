@@ -9,7 +9,7 @@
  *   - steering text points at a single long call, never a polling loop.
  */
 
-import { test, beforeEach } from 'node:test';
+import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -115,11 +115,35 @@ class McpDriver {
   close(): void {
     this.proc.stdin.end();
     this.proc.kill();
+    stopServer(this.home);
   }
 }
 
+/** Homes handed out by makeHome(), swept in after() in case a test forgot to close. */
+const homes: string[] = [];
+
+/**
+ * The MCP server starts the review server detached (it outlives the MCP
+ * process by design), so a test must stop it itself: SIGTERM the pid it
+ * recorded in <home>/server.json.
+ */
+function stopServer(home: string): void {
+  try {
+    const { pid } = JSON.parse(fs.readFileSync(path.join(home, 'server.json'), 'utf8')) as { pid?: number };
+    if (typeof pid === 'number' && pid > 1) process.kill(pid, 'SIGTERM');
+  } catch {
+    // no server was started, or it is already gone
+  }
+}
+
+after(() => {
+  for (const h of homes) stopServer(h);
+});
+
 async function makeHome(): Promise<string> {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'apr-mcp-'));
+  const h = fs.mkdtempSync(path.join(os.tmpdir(), 'apr-mcp-'));
+  homes.push(h);
+  return h;
 }
 
 /** Rewrite arbitrary fields on a review file — what the UI/API does. */

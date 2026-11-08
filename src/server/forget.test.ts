@@ -220,7 +220,7 @@ test('forget removes only the pointer files of that project and ignores bad ones
 
 test('a missing pointer folder is fine', async () => {
   const { store, env } = fixture();
-  const report = await forgetWorktree(store, path.join(env.userHome, 'x'), false, env);
+  const report = await forgetWorktree(store, path.join(env.userHome, 'x'), false, procEnv(env));
   assert.equal(report.matched, false);
 });
 
