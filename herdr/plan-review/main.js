@@ -10,6 +10,10 @@
 //        { terminal }       that agent's plan
 //        { terminal, window: true, page? }   the same, in an "Open in window" overlay
 //
+// Keyboard: when the plan is flipped to (or another agent is shown while the plan is up) the mod takes
+// the keyboard itself, so plan keys never reach the hidden agent terminal. Commands (keys.json, `run`):
+// `plan-review.back` / `.flip` (to the agent, keyboard back to its pane), `.focus` (take the keyboard).
+//
 // Server: the pointer's `server`, else install.json (written by `agent-plan-review herdr
 // install`) and agent-plan-review's server.json. "Start server" runs install.json's command.
 
@@ -126,10 +130,23 @@ export default class PlanReview extends View {
         this.touch(cx);
       }
     });
+    // The keyboard: asked for when the plan is flipped to, or by `plan-review.focus`. The element is
+    // not in the window yet in the frame the plan first shows, so focus() is retried until it holds.
+    cx.spawn(async (cx) => {
+      for (;;) {
+        if (!this.keysWanted) await new Promise((ok) => { this.keysWaker = ok; });
+        for (let i = 0; this.keysWanted && i < 25; i++) {
+          await sleep(cx, 40);
+          try { this.handle.focus(); await sleep(cx, 20); if (this.handle.is_focused()) break; } catch { break; }
+        }
+        this.keysWanted = false;
+      }
+    });
     cx.spawn(async (cx) => {
       for (;;) {
         const c = String(await nextCommand()).replace(/^plan-review\./, "");
         if (c === "back" || c === "flip") this.flipBack();
+        else if (c === "focus" && !this.windowed) this.wantKeys();
         else if (c === "window" && !this.windowed) this.openWindow();
         else if (c === "close-window" && this.windowed) closeOverlay(props()?.overlay);
         else if (c === "refresh" && this.doc) await this.refreshDoc(this.doc, cx, { force: true });
@@ -589,6 +606,13 @@ export default class PlanReview extends View {
       this.closeReply();
     }
     if (cx) this.prepareUnits(cx);
+  }
+
+  /** Ask for the keyboard (see init): plan keys must not reach the hidden agent terminal. */
+  wantKeys() {
+    this.keysWanted = true;
+    const w = this.keysWaker;
+    if (w) { this.keysWaker = null; w(); }
   }
 
   flipBack() {
@@ -1760,7 +1784,7 @@ export default class PlanReview extends View {
     // Just flipped to the plan: take the keyboard, so Esc and cmd-w reach the plan, not the hidden terminal.
     if (this.hasStack() && !this.windowed) {
       const shown = shared(VIEW_KEY) === PLAN_VIEW;
-      if (shown && !this.wasShown) { try { this.handle.focus(); } catch {} }
+      if (shown && !this.wasShown) this.wantKeys();
       this.wasShown = shown;
     }
     // The plan of the agent in the focused tab. Switching agents (or versions) drops the
@@ -1768,6 +1792,9 @@ export default class PlanReview extends View {
     const target = this.target();
     const d = target ? this.docs.get(this.docKey(target.pointer)) ?? null : null;
     if ((target?.terminal ?? null) !== this.terminal || d !== this.doc) {
+      // Another agent while the plan shows (a tab, agent.next, a click): Herdr gave the keyboard to
+      // that agent's terminal, which is hidden behind the plan. Take it back.
+      if (target && (target.terminal ?? null) !== this.terminal && this.hasStack() && !this.windowed && shared(VIEW_KEY) === PLAN_VIEW) this.wantKeys();
       this.terminal = target?.terminal ?? null;
       this.doc = d;
       this.sel = this.pill = this.press = null;
