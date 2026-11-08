@@ -3,3 +3,6 @@ dist/
 *.log
 .DS_Store
 tmp/
+herdr/plan-review/install.json
+herdr/plan-review/gpui-kit.d.ts
+herdr/plan-review/jsconfig.json

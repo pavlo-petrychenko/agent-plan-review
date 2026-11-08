@@ -18,7 +18,8 @@
     "build:server": "tsc -p tsconfig.server.json",
     "build:web": "tsc -p tsconfig.web.json --noEmit && vite build",
     "start": "node bin/plan-review.js serve",
-    "test": "tsx --test $(find src -name '*.test.ts')",
+    "test": "tsx --test $(find src -name '*.test.ts') && npm run test:herdr",
+    "test:herdr": "node --test herdr/plan-review/test/",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "lint": "eslint .",
     "format": "prettier --write ."

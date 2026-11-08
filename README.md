@@ -171,6 +171,8 @@ agent-plan-review herdr enable            # Herdr mod shows plans; no browser ta
 agent-plan-review herdr enable --browser  # pointer files AND the browser tab
 agent-plan-review herdr disable           # back to the default
 agent-plan-review herdr status
+agent-plan-review herdr install           # copy the plan-review mod into Herdr (run again after upgrading)
+agent-plan-review herdr uninstall         # remove it
 ```
 
 The setting lives in `<storage root>/config.json`
@@ -184,11 +186,38 @@ file means "off".
   newest first.
 - **Only when enabled:** each submit, Ask, agent reply, thread resolve and decision
   rewrites `<HERDR_APP_HOME or ~/.config/herdr-app>/data/plan-review/<terminal>.json`
-  atomically with `{ reviewId, projectKey, version, status, title, cwd, updatedAt }` for
+  atomically with `{ reviewId, projectKey, version, status, title, cwd, updatedAt, server }` for
   the terminal's newest review. A failed write is logged and never fails the review.
 - **Only when enabled, for agents in a Herdr terminal:** the hook and MCP server skip the
   browser tab unless `openBrowser` is true. The review server still starts as usual, and
   agents outside Herdr are unaffected.
+
+### The plan-review mod
+
+`herdr/plan-review/` is a Herdr mod that shows the plan of the agent in the focused tab, the
+same review as the browser: word-by-word drag selection, margin threads, the page tree,
+**Ask agent** (sent now, wakes the agent) next to the decision batch, replies, resolve and
+delete, whole-page comments, and **Approve** / **Request changes** with an optional summary.
+Agent replies show up in their thread as the pointer file changes; while a pending plan is
+on screen it also refreshes like the web page (2.5 s, then 5, 15, 30 s; paused while hidden).
+"Open in browser" opens the same review in the web UI.
+
+- **Install:** `agent-plan-review herdr install` **copies** the mod to
+  `<HERDR_APP_HOME>/mods/plan-review`. It is a copy, not a symlink, because Herdr does not
+  load files through a symlinked mod folder: every icon disappears ("a path led outside of the filesystem"). Run it again after
+  an upgrade: it updates the files in place and removes stale ones. (`--link` symlinks
+  instead, for working on the mod.) It also writes `install.json` there: the storage root,
+  port and `serve` command, so the mod finds the server and can start it.
+- **Show it:** open the mod as a pane beside an agent
+  (`herdr-app do pane.split --direction right --mod plan-review`), or in a layout block.
+  Props: none (the focused tab's agent) or `{ "terminal": "<id>" }` (one agent).
+- **Server not running:** the mod shows a "Start server" button that runs the installed
+  `serve` command detached.
+- **Images:** plan images (`/api/images/<file>`) are copied to
+  `<HERDR_APP_HOME>/data/plan-review/images/`, the only place a mod can draw images from.
+- **Tests:** `npm run test:herdr` (also part of `npm test`); `herdr-app check herdr/plan-review`.
+  `herdr/plan-review/dev/` has a pretend MCP agent (`agent.mjs`) and a test-window script
+  (`try.sh`).
 
 Comments may also carry `range: { start, end }` — character offsets into the page's
 markdown — for word-exact anchors. It is optional; it is dropped when a carried thread's
