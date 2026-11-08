@@ -498,3 +498,44 @@ test('plan_review_resolve rejects a reply id, an unknown thread, and a missing c
     driver.close();
   }
 });
+
+test('plan_review_submit links the review to HC_TERMINAL_ID with the MCP client name as harness', async () => {
+  const herdrHome = fs.mkdtempSync(path.join(os.tmpdir(), 'apr-mcp-herdr-'));
+  const driver = new McpDriver(home, { HC_TERMINAL_ID: 't3w', HERDR_APP_HOME: herdrHome });
+  try {
+    await driver.request('initialize', {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 'pi', version: '1' },
+    });
+    const reviewId = await submitBody(driver, '# Linked\n\nbody');
+    const review = JSON.parse(fs.readFileSync(path.join(home, 'reviews', `${reviewId}.json`), 'utf8')) as {
+      agent?: unknown;
+    };
+    assert.deepEqual(review.agent, { terminal: 't3w', harness: 'pi' });
+    // The integration is off by default: the link is metadata only.
+    assert.equal(fs.existsSync(path.join(herdrHome, 'data')), false, 'no pointer file while disabled');
+  } finally {
+    driver.close();
+  }
+});
+
+test('plan_review_submit writes the Herdr pointer when the integration is enabled', async () => {
+  const herdrHome = fs.mkdtempSync(path.join(os.tmpdir(), 'apr-mcp-herdr-'));
+  fs.writeFileSync(
+    path.join(home, 'config.json'),
+    JSON.stringify({ integrations: { herdr: { enabled: true, openBrowser: false } } }),
+  );
+  const driver = new McpDriver(home, { HC_TERMINAL_ID: 't9z', HERDR_APP_HOME: herdrHome });
+  try {
+    const reviewId = await submitPlan(driver);
+    const pointer = JSON.parse(
+      fs.readFileSync(path.join(herdrHome, 'data', 'plan-review', 't9z.json'), 'utf8'),
+    ) as { reviewId: string; status: string; title: string };
+    assert.equal(pointer.reviewId, reviewId);
+    assert.equal(pointer.status, 'pending');
+    assert.equal(pointer.title, 'Test Plan');
+  } finally {
+    driver.close();
+  }
+});

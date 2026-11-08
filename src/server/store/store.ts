@@ -14,14 +14,13 @@ import type {
   ProjectSummary,
   Review,
   ReviewMessagesPayload,
-  ReviewStatus,
   VersionPayload,
 } from '../../shared/types.js';
 import { loadConfig, type ServerConfig } from '../config.js';
 import { createLayout, type Layout } from './paths.js';
 import { CommentStore } from './comments.js';
 import { ProjectStore } from './projects.js';
-import { ReviewStore, FORCE_REJECT_REASON } from './reviews.js';
+import { ReviewStore, FORCE_REJECT_REASON, type ReviewFilter } from './reviews.js';
 import { VersionStore } from './versions.js';
 import { recordPlan, type RecordInput, type RecordOutput } from './record.js';
 import { compileApproval, compileRejection } from '../../shared/compile.js';
@@ -30,6 +29,7 @@ import { commentDelivery, groupThreads, latestCreatedAt } from '../../shared/thr
 import { renderMarkdown } from '../render/markdown.js';
 import { conflict, notFound, badRequest } from '../util/errors.js';
 import { withFileLock } from '../util/fs.js';
+import { syncHerdrPointers, type HerdrScope } from '../integrations/herdr.js';
 
 /**
  * Facade over the storage layer used by API routes and integrations.
@@ -53,7 +53,11 @@ export class PlanReviewStore {
   }
 
   recordPlan(input: RecordInput): Promise<RecordOutput> {
-    return this.coordinate(() => this.recordPlanUnlocked(input));
+    return this.coordinate(async () => {
+      const recorded = await this.recordPlanUnlocked(input);
+      await this.syncHerdr({ reviewId: recorded.reviewId });
+      return recorded;
+    });
   }
 
   private recordPlanUnlocked(input: RecordInput): Promise<RecordOutput> {
@@ -158,7 +162,12 @@ export class PlanReviewStore {
   }
 
   async addComment(key: string, n: number, input: CreateCommentInput): Promise<Comment> {
-    return this.coordinate(() => this.addCommentUnlocked(key, n, input));
+    return this.coordinate(async () => {
+      const comment = await this.addCommentUnlocked(key, n, input);
+      // Only an Ask reaches the agent; decision-batch comments stay silent.
+      if (comment.wakeReviewId) await this.syncHerdr({ reviewId: comment.wakeReviewId });
+      return comment;
+    });
   }
 
   private async addCommentUnlocked(key: string, n: number, input: CreateCommentInput): Promise<Comment> {
@@ -203,7 +212,11 @@ export class PlanReviewStore {
 
   /** Agent reply into an existing thread (author is set server-side). */
   async addAgentReply(key: string, n: number, rootId: string, body: string): Promise<Comment> {
-    return this.coordinate(() => this.createAgentReply(key, n, rootId, body));
+    return this.coordinate(async () => {
+      const comment = await this.createAgentReply(key, n, rootId, body);
+      await this.syncHerdr({ projectKey: key, version: n });
+      return comment;
+    });
   }
 
   async replyToReview(
@@ -214,6 +227,7 @@ export class PlanReviewStore {
     return this.coordinate(async () => {
       const target = await this.reviewReplyTarget(reviewId, rootId);
       const comment = await this.createAgentReply(target.review.projectKey, target.version, rootId, body);
+      await this.syncHerdr({ reviewId });
       return { comment, version: target.version };
     });
   }
@@ -270,6 +284,7 @@ export class PlanReviewStore {
     return this.coordinate(async () => {
       const updated = await this.comments.setResolved(key, n, commentId, resolved);
       if (!updated) throw notFound('Thread');
+      await this.syncHerdr({ projectKey: key, version: n });
       return updated;
     });
   }
@@ -362,7 +377,11 @@ export class PlanReviewStore {
     decision: 'approve' | 'reject',
     summary?: string,
   ): Promise<DecisionResponse> {
-    return this.coordinate(() => this.decideReviewUnlocked(id, decision, summary));
+    return this.coordinate(async () => {
+      const decided = await this.decideReviewUnlocked(id, decision, summary);
+      await this.syncHerdr({ reviewId: id });
+      return decided;
+    });
   }
 
   private async decideReviewUnlocked(
@@ -462,6 +481,7 @@ export class PlanReviewStore {
     }
     for (const r of pending) {
       await this.reviews.decide(r.id, 'reject', { reason: FORCE_REJECT_REASON });
+      await this.syncHerdr({ reviewId: r.id });
     }
 
     await this.versions.deleteFiles(key, n);
@@ -487,6 +507,7 @@ export class PlanReviewStore {
       }
       for (const r of pending) {
         await this.reviews.decide(r.id, 'reject', { reason: FORCE_REJECT_REASON });
+        await this.syncHerdr({ reviewId: r.id });
       }
       const versionMeta = await this.versions.readMeta(key, n);
       if (!versionMeta) {
@@ -565,6 +586,7 @@ export class PlanReviewStore {
     }
     for (const r of pending) {
       await this.reviews.decide(r.id, 'reject', { reason: FORCE_REJECT_REASON });
+      await this.syncHerdr({ reviewId: r.id });
     }
     await this.projects.remove(key);
   }
@@ -591,7 +613,7 @@ export class PlanReviewStore {
   // Reviews helpers
   // -------------------------------------------------------------------------
 
-  listReviews(filter?: { status?: ReviewStatus; projectKey?: string; version?: number }): Promise<Review[]> {
+  listReviews(filter?: ReviewFilter): Promise<Review[]> {
     return this.reviews.list(filter);
   }
 
@@ -601,6 +623,14 @@ export class PlanReviewStore {
 
   async pruneResolved(): Promise<void> {
     return this.coordinate(() => this.reviews.pruneResolved());
+  }
+
+  /**
+   * Refresh Herdr pointer files after a mutation. A no-op unless the Herdr
+   * integration is enabled; never throws (see integrations/herdr.ts).
+   */
+  private syncHerdr(scope: HerdrScope): Promise<void> {
+    return syncHerdrPointers(this, scope);
   }
 
   private coordinate<T>(fn: () => Promise<T>): Promise<T> {

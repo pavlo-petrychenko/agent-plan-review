@@ -28,7 +28,8 @@ import type { Review } from '../../shared/types.js';
 import { readStdinJson, finish, type PreToolUseInput } from './hook-io.js';
 import { ensureServerRunning } from './spawn-server.js';
 import { waitForDecisionOrAsk } from './poll.js';
-import { openBrowser } from './browser.js';
+import { openReview } from './browser.js';
+import { agentFromEnv } from './herdr.js';
 
 export async function runExitPlanModeHook(): Promise<void> {
   const input = (await readStdinJson()) as PreToolUseInput;
@@ -40,6 +41,8 @@ export async function runExitPlanModeHook(): Promise<void> {
 
     await ensureServerRunning();
     const store = new PlanReviewStore(loadConfig());
+    // Herdr terminal link (HC_TERMINAL_ID) — plain metadata, always recorded.
+    const agent = agentFromEnv('claude-code');
 
     let recorded;
     try {
@@ -50,6 +53,7 @@ export async function runExitPlanModeHook(): Promise<void> {
         // Reuse this session's pending review so a question → answer →
         // re-present round stays one continuous thread.
         sessionId: input.session_id,
+        agent,
         markdown: plan,
       });
     } catch (err) {
@@ -70,7 +74,9 @@ export async function runExitPlanModeHook(): Promise<void> {
       // answered a question and re-presented): their tab is still correct.
       // A reused review on a REVISED plan is not — the review now points at a
       // new version they have not seen.
-      if (!recorded.reusedReview || !recorded.deduped) openBrowser(recorded.reviewUrl);
+      if (!recorded.reusedReview || !recorded.deduped) {
+        openReview(recorded.reviewUrl, { home: store.config.home, terminal: agent?.terminal });
+      }
       review = (await store.getReview(recorded.reviewId)) ?? undefined;
     }
     if (!review) return finish({});

@@ -8,6 +8,7 @@
  *   agent-plan-review enter-plan-mode    Claude Code EnterPlanMode context hook
  *   agent-plan-review install-skill      install the global agent skill
  *   agent-plan-review install-pi-extension  install the plan-review-wake pi extension
+ *   agent-plan-review herdr enable|disable|status  optional Herdr integration
  */
 
 import fs from 'node:fs';
@@ -20,6 +21,7 @@ import { runExitPlanModeHook } from './integrations/hook-exit-plan-mode.js';
 import { runStopGate } from './integrations/stop-gate.js';
 import { runEnterPlanModeHook } from './integrations/enter-plan-mode.js';
 import { PI_WAKE_EXTENSION_FILENAME, PI_WAKE_EXTENSION_SOURCE } from './integrations/pi-wake-source.js';
+import { runHerdrCommand } from './integrations/herdr.js';
 import { installSkill } from './skill.js';
 import { APP_NAME, loadConfig } from './config.js';
 
@@ -40,6 +42,10 @@ Commands:
   hook-exit-plan-mode      ExitPlanMode PreToolUse hook (blocking review)
   stop-gate                Stop-hook gate for pending MCP/API reviews (reminds once per review)
   enter-plan-mode          EnterPlanMode context hook (multidoc guidance)
+  herdr enable [--browser] Turn on the optional Herdr integration (pointer files for the
+                           Herdr mod; --browser keeps opening the browser too)
+  herdr disable            Turn the Herdr integration off (the default)
+  herdr status             Show the effective Herdr settings
 
 Integration — Claude Code (hooks, blocking):
   ~/.claude/settings.json → hooks:
@@ -61,6 +67,8 @@ Environment:
   AGENT_PLAN_REVIEW_TIMEOUT     Hook blocking timeout in seconds (default 1800)
   AGENT_PLAN_REVIEW_MAX_WAIT    plan_review_check ceiling in seconds (default 172800 = 48 h)
   AGENT_PLAN_REVIEW_PROGRESS_MS Keepalive progress interval during checks (default 20000)
+  AGENT_PLAN_REVIEW_HERDR       0|1 — override integrations.herdr.enabled from config.json
+  HERDR_APP_HOME                Herdr data root for pointer files (default ~/.config/herdr-app)
   (legacy PLAN_REVIEW_* spellings are still honored)
 `;
 
@@ -96,6 +104,13 @@ switch (command) {
   case 'enter-plan-mode':
     void runEnterPlanModeHook();
     break;
+  case 'herdr': {
+    const code = runHerdrCommand(process.argv.slice(3), cfg.home, (line) =>
+      process.stdout.write(`${line}\n`),
+    );
+    process.exit(code);
+    break;
+  }
   default:
     process.stdout.write(HELP);
     process.exit(command ? 1 : 0);

@@ -40,6 +40,12 @@ export interface Comment {
   baseVersion?: number;
   /** Verbatim selected text, whitespace-normalized, capped at MAX_QUOTE_LEN. */
   quote: string | null;
+  /**
+   * Word-exact anchor: character offsets [start, end) into this page's markdown
+   * source. Optional and advisory — clients that lack it fall back to the line
+   * anchor plus quote search. Dropped when a carried thread's line anchor moves.
+   */
+  range?: CommentRange;
   body: string;
   author: CommentAuthor;
   createdAt: string;
@@ -63,6 +69,20 @@ export interface Comment {
 }
 
 export const MAX_QUOTE_LEN = 2000;
+
+/** Character offsets [start, end) into a page's markdown source. */
+export interface CommentRange {
+  start: number;
+  end: number;
+}
+
+/** Which terminal (and harness) a review was submitted from. */
+export interface ReviewAgent {
+  /** Terminal id, e.g. Herdr's HC_TERMINAL_ID. */
+  terminal: string;
+  /** Agent harness, e.g. 'claude-code' or the MCP client name. */
+  harness?: string;
+}
 
 export interface DocMeta {
   slug: string;
@@ -128,6 +148,11 @@ export interface Review {
    * cursor are orphaned on the previous version.
    */
   sessionId?: string;
+  /**
+   * The terminal the submitting agent runs in (Herdr's HC_TERMINAL_ID), when
+   * known. Plain metadata: recorded whether or not the Herdr integration is on.
+   */
+  agent?: ReviewAgent;
   /**
    * ISO timestamp of the newest targeted Ask already handed to the agent by
    * plan_review_check — the cursor that keeps the conversation from looping.
@@ -195,6 +220,7 @@ export interface CreateCommentInput {
   line?: number | null;
   lineEnd?: number | null;
   quote?: string | null;
+  range?: CommentRange;
   body: string;
   delivery?: CommentDelivery;
   reviewId?: string;

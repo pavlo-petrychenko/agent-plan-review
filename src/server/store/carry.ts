@@ -44,16 +44,16 @@ export async function carryOpenThreads(args: {
   }
 
   const maps = new Map<string, Map<number, number>>();
+  const texts = new Map<string, { from: string; to: string }>();
   const loadMap = async (slug: string): Promise<Map<number, number> | null> => {
     const cached = maps.get(slug);
     if (cached) return cached;
     const toText = toBodies.get(slug);
     if (toText == null) return null; // document gone on the new side
     const fromText =
-      toKind === 'tree'
-        ? await versions.readDoc(key, fromN, slug)
-        : await versions.readMarkdown(key, fromN);
+      toKind === 'tree' ? await versions.readDoc(key, fromN, slug) : await versions.readMarkdown(key, fromN);
     if (fromText == null) return null;
+    texts.set(slug, { from: fromText, to: toText });
     const map = new Map<number, number>();
     // Split rows pair a rewritten line's old+new numbers, so a comment on an
     // edited line re-anchors to that same line instead of the one above it
@@ -81,16 +81,20 @@ export async function carryOpenThreads(args: {
     const map = await loadMap(root.doc);
     if (!map) continue; // anchor's document no longer exists
     const line = remap(root.line, map);
-    const lineEnd = line == null ? null : remap(root.lineEnd, map) ?? line;
+    const lineEnd = line == null ? null : (remap(root.lineEnd, map) ?? line);
     // A carried anchor now points at the NEW version's own lines: the old-side /
     // base-version framing described a line of a version that is no longer under
     // review, and keeping it would make replies resolve against the wrong side.
+    // A word-exact range survives only when it still names the same text at
+    // the same offsets on an unmoved line; otherwise clients use the quote.
+    const range = keepRange(root, line, lineEnd, texts.get(root.doc));
     const rebase = (c: Comment): Comment => ({
       ...c,
       line,
       lineEnd,
       side: undefined,
       baseVersion: undefined,
+      range: range ? c.range : undefined,
     });
     carried.push(rebase(root));
     for (const reply of repliesByRoot.get(root.id) ?? []) carried.push(rebase(reply));
@@ -99,4 +103,22 @@ export async function carryOpenThreads(args: {
   if (carried.length === 0) return 0;
   await comments.writeAll(key, toN, carried);
   return carried.filter((c) => c.parentId == null).length;
+}
+
+/**
+ * Whether a root's `range` still holds on the new version: the line anchor did
+ * not move, the anchor described the reviewed side (not a removed base line),
+ * and the offsets select the same text in both versions.
+ */
+function keepRange(
+  root: Comment,
+  line: number | null,
+  lineEnd: number | null,
+  texts: { from: string; to: string } | undefined,
+): boolean {
+  const range = root.range;
+  if (!range || !texts || root.side === 'old') return false;
+  if (line == null || line !== root.line || lineEnd !== root.lineEnd) return false;
+  if (range.end > texts.from.length || range.end > texts.to.length) return false;
+  return texts.from.slice(range.start, range.end) === texts.to.slice(range.start, range.end);
 }

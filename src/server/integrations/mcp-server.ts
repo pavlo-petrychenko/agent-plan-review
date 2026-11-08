@@ -25,7 +25,8 @@ import { sameProjectCwd } from '../util/project-cwd.js';
 import { compileIssues } from '../../shared/compile.js';
 import type { Comment, Review } from '../../shared/types.js';
 import { ensureServerRunning } from './spawn-server.js';
-import { openBrowser } from './browser.js';
+import { openReview } from './browser.js';
+import { agentFromEnv } from './herdr.js';
 
 interface RpcRequest {
   jsonrpc?: string;
@@ -191,6 +192,8 @@ const TOOLS = [
 
 export async function runMcpServer(): Promise<void> {
   const store = new PlanReviewStore(loadConfig());
+  /** MCP client name from `initialize` clientInfo (e.g. "claude-code", "pi"). */
+  let clientName: string | undefined;
 
   const write = (obj: unknown): void => {
     process.stdout.write(`${JSON.stringify(obj)}\n`);
@@ -202,6 +205,9 @@ export async function runMcpServer(): Promise<void> {
       return {};
     }
     if (msg.method === 'initialize') {
+      // Remember who we talk to: the client name becomes the review's harness.
+      const info = (msg.params as { clientInfo?: { name?: unknown } } | undefined)?.clientInfo;
+      if (typeof info?.name === 'string' && info.name.trim()) clientName = info.name.trim();
       const requested = String(
         (msg.params as { protocolVersion?: string } | undefined)?.protocolVersion ?? '',
       );
@@ -295,6 +301,8 @@ export async function runMcpServer(): Promise<void> {
     const images = Array.isArray(args.images)
       ? (args.images as { name: string; path?: string; dataBase64?: string }[])
       : undefined;
+    // Herdr terminal link (HC_TERMINAL_ID) — plain metadata, always recorded.
+    const agent = agentFromEnv(clientName);
     const markdown =
       typeof args.markdown === 'string'
         ? args.markdown
@@ -307,11 +315,14 @@ export async function runMcpServer(): Promise<void> {
         cwd,
         name: typeof args.name === 'string' ? args.name : undefined,
         origin: 'mcp',
+        agent,
         markdown,
         docs,
         images,
       });
-      if (!result.isLoser && !serverWarning) openBrowser(result.reviewUrl);
+      if (!result.isLoser && !serverWarning) {
+        openReview(result.reviewUrl, { home: store.config.home, terminal: agent?.terminal });
+      }
       return toolText(
         serverWarning +
           JSON.stringify(

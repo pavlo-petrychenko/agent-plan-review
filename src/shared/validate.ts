@@ -6,7 +6,7 @@
  * without any further context.
  */
 
-import type { PlanIssue, DocMeta } from './types.js';
+import type { CommentRange, PlanIssue, DocMeta } from './types.js';
 import { extractDocLinks } from './markdownLinks.js';
 
 export const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -106,4 +106,25 @@ export function validateDocs(docs: ValidatableDoc[], bodies: Map<string, string>
   }
 
   return issues;
+}
+
+/**
+ * Validate an optional comment `range` (character offsets [start, end) into a
+ * page's markdown source). Absent gives `{}`; malformed gives `{ error }` with
+ * an actionable message. Offsets past the end of the page are not checked: the
+ * range is advisory and clients fall back to the quote when it misses.
+ */
+export function parseCommentRange(raw: unknown): { range?: CommentRange; error?: string } {
+  if (raw == null) return {};
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return { error: 'range must be an object { start, end } of character offsets' };
+  }
+  const { start, end } = raw as Record<string, unknown>;
+  if (typeof start !== 'number' || !Number.isInteger(start) || start < 0) {
+    return { error: 'range.start must be a non-negative integer' };
+  }
+  if (typeof end !== 'number' || !Number.isInteger(end) || end <= start) {
+    return { error: 'range.end must be an integer greater than range.start' };
+  }
+  return { range: { start, end } };
 }

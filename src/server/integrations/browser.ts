@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { shouldOpenBrowser } from './herdr.js';
 
 /** Open a URL in the default browser. Failures are silently ignored. */
 export function openBrowser(url: string): void {
@@ -18,4 +19,15 @@ export function openBrowser(url: string): void {
   } catch {
     // Never fail a review flow because the browser couldn't open.
   }
+}
+
+/**
+ * Open a review from the hook or MCP server. Identical to `openBrowser` unless
+ * the Herdr integration is enabled and the agent runs in a Herdr terminal —
+ * then the Herdr mod shows the plan, and the browser opens only when
+ * `integrations.herdr.openBrowser` is true.
+ */
+export function openReview(url: string, opts: { home: string; terminal?: string }): void {
+  if (!shouldOpenBrowser(opts.home, opts.terminal)) return;
+  openBrowser(url);
 }

@@ -48,7 +48,7 @@ export class CommentStore {
     return withFileLock(this.layout.commentsFile(projectKey, n), async () => {
       const comments = await this.list(projectKey, n);
 
-      let anchor: Pick<Comment, 'doc' | 'line' | 'lineEnd' | 'side' | 'baseVersion' | 'quote'>;
+      let anchor: Pick<Comment, 'doc' | 'line' | 'lineEnd' | 'side' | 'baseVersion' | 'quote' | 'range'>;
       if (input.parentId != null) {
         const root = comments.find((c) => c.id === input.parentId && c.parentId == null);
         if (!root) throw new Error('Parent comment not found');
@@ -58,6 +58,7 @@ export class CommentStore {
           line: root.line,
           lineEnd: root.lineEnd,
           quote: root.quote,
+          ...(root.range ? { range: root.range } : {}),
           ...(root.side === 'old' ? { side: root.side, baseVersion: root.baseVersion } : {}),
         };
       } else {
@@ -66,6 +67,7 @@ export class CommentStore {
           line: input.line ?? null,
           lineEnd: input.lineEnd ?? null,
           quote: input.quote ? input.quote.slice(0, MAX_QUOTE_LEN) : null,
+          ...(input.range ? { range: { start: input.range.start, end: input.range.end } } : {}),
           ...(input.side === 'old' ? { side: input.side, baseVersion: input.baseVersion } : {}),
         };
       }

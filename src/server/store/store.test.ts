@@ -773,3 +773,69 @@ test('an Ask needs a consumer: api reviews still may not take one', async () => 
   assert.equal(batch.decisionReviewId, undefined);
   assert.equal(batch.delivery, 'decision');
 });
+
+test('a carried thread keeps its word range only while the line anchor and text hold', async () => {
+  const store = makeStore();
+  const cwd = makeDir('apr-carry-range-');
+  const v1Text = '# Plan\n\nalpha one\n\nbeta two\n';
+  const v1 = await store.recordPlan({ cwd, origin: 'mcp', markdown: v1Text });
+  const offset = (text: string, word: string) => ({
+    start: text.indexOf(word),
+    end: text.indexOf(word) + word.length,
+  });
+  const beta = await store.addComment(v1.projectKey, 1, {
+    body: 'beta?',
+    line: 5,
+    lineEnd: 5,
+    quote: 'two',
+    range: offset(v1Text, 'two'),
+  });
+  assert.deepEqual(beta.range, offset(v1Text, 'two'), 'range persists on create');
+
+  // Only the tail changes: line 5 and the text at the offsets are untouched.
+  await store.recordPlan({ cwd, origin: 'mcp', markdown: '# Plan\n\nalpha one\n\nbeta two\n\ngamma\n' });
+  const [kept] = (await store.listComments(v1.projectKey, 2)).filter((c) => c.parentId == null);
+  assert.equal(kept.line, 5);
+  assert.deepEqual(kept.range, offset(v1Text, 'two'), 'unmoved anchor keeps its range');
+
+  // A line inserted above moves the anchor: the range is dropped, the quote stays.
+  await store.recordPlan({
+    cwd,
+    origin: 'mcp',
+    markdown: '# Plan\n\nintro\n\nalpha one\n\nbeta two\n\ngamma\n',
+  });
+  const [moved] = (await store.listComments(v1.projectKey, 3)).filter((c) => c.parentId == null);
+  assert.equal(moved.line, 7);
+  assert.equal(moved.range, undefined, 'moved anchor drops its range');
+  assert.equal(moved.quote, 'two');
+});
+
+test('a reused hook review records and updates its agent terminal', async () => {
+  const store = makeStore();
+  const cwd = makeDir('apr-session-agent-');
+  const first = await store.recordPlan({
+    cwd,
+    origin: 'hook',
+    sessionId: 'sess-a',
+    markdown: '# Plan\n\nStep.',
+    agent: { terminal: 't1', harness: 'claude-code' },
+  });
+  assert.deepEqual((await store.getReview(first.reviewId))?.agent, { terminal: 't1', harness: 'claude-code' });
+
+  // Same plan, same session, now from another terminal: same review, new link.
+  const again = await store.recordPlan({
+    cwd,
+    origin: 'hook',
+    sessionId: 'sess-a',
+    markdown: '# Plan\n\nStep.',
+    agent: { terminal: 't2', harness: 'claude-code' },
+  });
+  assert.equal(again.reviewId, first.reviewId);
+  assert.deepEqual((await store.getReview(first.reviewId))?.agent, { terminal: 't2', harness: 'claude-code' });
+
+  // A revision without a known terminal keeps the existing link.
+  await store.recordPlan({ cwd, origin: 'hook', sessionId: 'sess-a', markdown: '# Plan\n\nStep two.' });
+  const review = await store.getReview(first.reviewId);
+  assert.equal(review?.version, 2);
+  assert.deepEqual(review?.agent, { terminal: 't2', harness: 'claude-code' });
+});

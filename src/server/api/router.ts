@@ -8,6 +8,7 @@ import { badRequest, conflict, notFound } from '../util/errors.js';
 import { forceFlag, parseVersionParam, wrap } from './helpers.js';
 import { IMAGE_FILE_RE, contentTypeFor, storePlanImage } from '../store/images.js';
 import { renderCommentBody } from '../render/comments.js';
+import { parseCommentRange } from '../../shared/validate.js';
 
 /** Assemble the full /api router. */
 export function createApiRouter(store: PlanReviewStore): Router {
@@ -237,6 +238,8 @@ export function createApiRouter(store: PlanReviewStore): Router {
     if (typeof req.query.project === 'string') filter.projectKey = req.query.project;
     if (typeof req.query.version === 'string' && req.query.version !== '') filter.version = Number.parseInt(req.query.version, 10);
     if (typeof req.query.status === 'string') filter.status = req.query.status as never;
+    // ?terminal=<id>: one agent terminal's reviews (any status, newest first).
+    if (typeof req.query.terminal === 'string' && req.query.terminal) filter.terminal = req.query.terminal;
     res.json(await store.listReviews(filter));
   }));
 
@@ -304,12 +307,15 @@ function validateCommentBody(body: unknown): CreateCommentInput {
   if (side === 'old' && baseVersion == null) {
     throw badRequest('baseVersion is required for old-side (removed-line) comments');
   }
+  const { range, error: rangeError } = parseCommentRange(b.range);
+  if (rangeError) throw badRequest(rangeError);
 
   return {
     doc: typeof b.doc === 'string' ? b.doc : undefined,
     line,
     lineEnd,
     quote: typeof b.quote === 'string' ? b.quote : null,
+    ...(range ? { range } : {}),
     body: b.body,
     delivery: b.delivery === 'ask' || b.delivery === 'decision' ? b.delivery : undefined,
     reviewId: typeof b.reviewId === 'string' && b.reviewId ? b.reviewId : undefined,

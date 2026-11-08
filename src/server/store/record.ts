@@ -1,7 +1,14 @@
 import { createHash } from 'node:crypto';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import type { Manifest, ProjectMeta, PlanIssue, RecordPlanResult, ReviewOrigin } from '../../shared/types.js';
+import type {
+  Manifest,
+  ProjectMeta,
+  PlanIssue,
+  RecordPlanResult,
+  ReviewAgent,
+  ReviewOrigin,
+} from '../../shared/types.js';
 import { parsePlan, type ParsedDoc } from '../../shared/parser.js';
 import { validateDocs, type ValidatableDoc } from '../../shared/validate.js';
 import { sanitizeProjectKey } from '../../shared/keys.js';
@@ -33,6 +40,8 @@ export interface RecordInput {
    * presentations instead of a fresh one per call (see `recordPlan`).
    */
   sessionId?: string;
+  /** Terminal/harness the agent submitted from (HC_TERMINAL_ID), when known. */
+  agent?: ReviewAgent;
   /** Exactly one of: raw plan markdown (markers allowed) or structured docs. */
   markdown?: string;
   docs?: StructuredDoc[];
@@ -244,10 +253,18 @@ export async function recordPlan(
       : undefined;
   const reusedReview = reusable != null;
 
+  // A reused review also follows the agent's terminal link, so a re-present
+  // from a different (or newly known) terminal keeps the link current.
+  const agentChanged =
+    input.agent != null &&
+    (reusable?.agent?.terminal !== input.agent.terminal || reusable?.agent?.harness !== input.agent.harness);
   const review = reusedReview
-    ? reusable.version === version
+    ? reusable.version === version && !agentChanged
       ? reusable
-      : ((await reviews.update(reusable.id, { version, toolUseId: input.toolUseId })) ?? reusable)
+      : ((await reviews.update(reusable.id, {
+          ...(reusable.version === version ? {} : { version, toolUseId: input.toolUseId }),
+          ...(agentChanged ? { agent: input.agent } : {}),
+        })) ?? reusable)
     : await reviews.create({
         projectKey: key,
         version,
@@ -258,6 +275,7 @@ export async function recordPlan(
         agentCwd: rawCwd === cwd ? undefined : rawCwd,
         toolUseId: input.toolUseId,
         sessionId: input.sessionId,
+        agent: input.agent,
       });
 
   const reviewUrl = `http://localhost:${port}/?project=${encodeURIComponent(key)}&version=${version}&review=${review.id}`;
@@ -277,7 +295,7 @@ export async function recordPlan(
 // small helpers
 // ---------------------------------------------------------------------------
 
-function extractRootTitle(markdown: string): string {
+export function extractRootTitle(markdown: string): string {
   for (const line of markdown.split('\n')) {
     const m = /^ {0,3}#\s+(.+?)\s*#*\s*$/.exec(line);
     if (m) return m[1].trim();

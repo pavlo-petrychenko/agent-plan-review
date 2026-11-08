@@ -1,7 +1,15 @@
-import type { Review, ReviewStatus } from '../../shared/types.js';
+import type { Review, ReviewAgent, ReviewStatus } from '../../shared/types.js';
 import { RESOLVED_TTL_MS } from '../config.js';
 import type { Layout } from './paths.js';
 import { ensureDir, listFiles, readJson, removePath, withFileLock, writeJson } from '../util/fs.js';
+
+export interface ReviewFilter {
+  status?: ReviewStatus;
+  projectKey?: string;
+  version?: number;
+  /** Only reviews submitted from this terminal (`agent.terminal`). */
+  terminal?: string;
+}
 
 /**
  * Review persistence. Reviews are top-level (not nested per project) so the
@@ -18,6 +26,7 @@ export class ReviewStore {
     agentCwd?: string;
     toolUseId?: string;
     sessionId?: string;
+    agent?: ReviewAgent;
   }): Promise<Review> {
     const review: Review = {
       id: crypto.randomUUID(),
@@ -61,7 +70,7 @@ export class ReviewStore {
     });
   }
 
-  async list(filter?: { status?: ReviewStatus; projectKey?: string; version?: number }): Promise<Review[]> {
+  async list(filter?: ReviewFilter): Promise<Review[]> {
     await ensureDir(this.layout.reviewsDir);
     const files = await listFiles(this.layout.reviewsDir);
     const reviews: Review[] = [];
@@ -72,6 +81,7 @@ export class ReviewStore {
       if (filter?.status && r.status !== filter.status) continue;
       if (filter?.projectKey && r.projectKey !== filter.projectKey) continue;
       if (filter?.version != null && r.version !== filter.version) continue;
+      if (filter?.terminal && r.agent?.terminal !== filter.terminal) continue;
       reviews.push(r);
     }
     return reviews.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
