@@ -18,7 +18,7 @@
 // install`) and agent-plan-review's server.json. "Start server" runs install.json's command.
 
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, TextareaState, Textarea } from "gpui-base";
+import { v_flex, h_flex, TextareaState, Textarea, Popover } from "gpui-base";
 import { props, theme, settings, appHome, readTextFile, exec, notify, watchFolder, nextCommand, run, setShared, openOverlay, closeOverlay, focused, panes, shared, layout } from "herdr";
 import { planFromDocs, planWithRemoved, pageOr, neighbour, ancestors, treeRows } from "./plan.js";
 import { parsePage, wordText } from "./markdown.js";
@@ -30,7 +30,7 @@ import { parseInstall, serverUrl, reviewPageUrl, startScript, pollDelay } from "
 import { createApi } from "./api.js";
 import { delivery, withDelivery, sentLabel, decisionState } from "./review.js";
 import { buildDiffPage, collapseRows, removedRowOf } from "./diff.js";
-import { VERSION_STATES, PAGE_MARKS, versionList, shownVersion, pointerFor, diffBase, stepBase, switcherWindow, neighbourVersion, diffIndex } from "./versions.js";
+import { VERSION_STATES, PAGE_MARKS, versionList, shownVersion, pointerFor, diffBase, stepBase, neighbourVersion, diffIndex } from "./versions.js";
 
 const MOD = "mods/plan-review";
 const ICON = (n) => `${MOD}/icons/${n}.svg`;
@@ -38,7 +38,7 @@ const SIDEBAR_W = 256;
 const MARGIN_W = 300;
 const GAP = 36;
 const PAD = 40;
-const TEXT_MAX = 700;
+const TEXT_DEFAULT = 700; // before the first layout; the text itself fills the pane (see render)
 const TEXT_MIN = 460;
 const BASE = 15;
 const LINE = 26;
@@ -103,6 +103,7 @@ export default class PlanReview extends View {
     this.confirmDelete = null;
     this.showResolved = false;
     this.sidebar = null; // the page tree: null = shown when the view is wide enough
+    this.versionsOpen = false; // the version list (a Popover) is open
     this.width = 1200;
     this.blockH = new Map();
     this.winTop = new Map(); // page → top of the mounted window, from the scroll position
@@ -387,6 +388,7 @@ export default class PlanReview extends View {
     else if (c === "resolved") this.showResolved = !this.showResolved;
     else if (c === "browser") this.openBrowser(cx);
     else if (c === "diff") this.toggleDiff(cx);
+    else if (c === "versions") { if (this.versions().length > 0) this.versionsOpen = !this.versionsOpen; }
     else if (c === "prev-version" || c === "next-version") this.pickVersion(neighbourVersion(this.versions(), this.doc.pointer.version, c === "next-version" ? 1 : -1), cx);
   }
 
@@ -901,7 +903,8 @@ export default class PlanReview extends View {
   key(e, cx) {
     const k = e.keystroke;
     if (k === "escape") {
-      if (this.deciding) this.closeDecision();
+      if (this.versionsOpen) { this.versionsOpen = false; this.handle.focus(); }
+      else if (this.deciding) this.closeDecision();
       else if (this.replying) this.closeReply();
       else if (this.composer) this.closeComposer();
       else if (this.sel || this.pill) { this.setSel(null, cx); this.pill = null; }
@@ -926,6 +929,7 @@ export default class PlanReview extends View {
     if (step) { this.goto(neighbour(this.plan, this.slug, step), cx); cx.stop_propagation(); return this.touch(cx); }
     if (k === "r") { this.showResolved = !this.showResolved; return this.touch(cx); }
     if (k === "d") { this.toggleDiff(cx); cx.stop_propagation(); return this.touch(cx); }
+    if (k === "v" && this.versions().length > 0) { this.versionsOpen = !this.versionsOpen; cx.stop_propagation(); return this.touch(cx); }
   }
 
   // ---------------------------------------------------------------------------- colours
@@ -1119,7 +1123,7 @@ export default class PlanReview extends View {
       this.tintsSig = this.tintSig();
       this.tints = tintMap(this.threads, this.slug, this.active, this.showResolved);
     }
-    return { c: this.colors(), tints: this.tints, sel: range(this.sel), size: BASE, textW: this.textW ?? TEXT_MAX };
+    return { c: this.colors(), tints: this.tints, sel: range(this.sel), size: BASE, textW: this.textW ?? TEXT_DEFAULT };
   }
 
   // One unit: a whole block, or a chunk of a list, table or code block.
@@ -1182,7 +1186,7 @@ export default class PlanReview extends View {
   diffH(dp, row) {
     const m = this.ui?.h[row];
     if (m >= 0) return m;
-    const per = Math.max(20, Math.floor(((this.textW ?? TEXT_MAX) - 130) / 7.6));
+    const per = Math.max(20, Math.floor(((this.textW ?? TEXT_DEFAULT) - 130) / 7.6));
     return Math.max(1, Math.ceil((dp.rows[row].text.length + 1) / per)) * 20 + 2;
   }
 
@@ -1268,7 +1272,7 @@ export default class PlanReview extends View {
   unitH(u, b) {
     const m = this.ui.h[u.id];
     if (m >= 0) return m;
-    const tw = this.textW ?? TEXT_MAX;
+    const tw = this.textW ?? TEXT_DEFAULT;
     const lines = (f, w = tw, cw = 7.6) => Math.max(1, Math.ceil(f.words.reduce((n, x) => n + wordText(x).length + 1, 0) * cw / w));
     switch (b.type) {
       case "heading": { const size = [0, 27, 21, 17.5, 16, 15, 15][b.level]; return lines(b.flow, tw, size * 0.5) * Math.round(size * 1.35) + (b.level === 1 ? 11 : 0); }
@@ -1529,7 +1533,8 @@ export default class PlanReview extends View {
       .child(v_flex().px(16).pt(16).pb(12).gap(4)
         .child(h_flex().gap(6).items_center().text_size(10.5).font_weight(600).text_color(t.dim).child(svg(ICON("file")).size(12)).child("PLAN"))
         .child(div().text_size(14).font_weight(600).line_height("19px").text_color(t.foreground).child(this.plan.title))
-        .child(div().text_size(11.5).text_color(t.dim).truncate().child(`v${d.pointer.version}${df ? ` vs v${df.base}` : ""} · ${this.plan.pages.length} page${this.plan.pages.length === 1 ? "" : "s"}${d.pointer.cwd ? ` · ${d.pointer.cwd.split("/").pop()}` : ""}`)))
+        .child(div().text_size(11.5).text_color(t.dim).truncate().child(`v${d.pointer.version}${df ? ` vs v${df.base}` : ""} · ${this.plan.pages.length} page${this.plan.pages.length === 1 ? "" : "s"}${d.pointer.cwd ? ` · ${d.pointer.cwd.split("/").pop()}` : ""}`))
+        .when(this.versions().length > 0, (x) => x.child(div().w_full().pt(6).child(this.versionSelect(c, true)))))
       .child(v_flex().id("tree").flex_1().min_h(0).overflow_y_scrollbar().px(8).pb(8).gap(1)
         .children(rows.map((r) => {
           const on = r.slug === this.slug;
@@ -1550,6 +1555,7 @@ export default class PlanReview extends View {
         .child(this.hint("[  ]", "previous / next page", c))
         .child(this.hint("drag", "select words · shift-click extends", c))
         .child(this.hint("⏎", "comment · ⌘C copy · Esc clear", c))
+        .child(this.hint("V", "switch plan version", c))
         .child(this.hint("R", "show resolved threads", c)));
   }
 
@@ -1563,7 +1569,6 @@ export default class PlanReview extends View {
   topbar(c) {
     const { t } = c;
     const pg = this.plan.bySlug.get(this.slug);
-    const idx = this.plan.pages.indexOf(pg);
     const crumbs = ancestors(this.plan, this.slug);
     const resolvedHere = this.threadsHere().filter((x) => x.status !== "open").length;
     const compact = this.width - (this.sidebarOn() ? SIDEBAR_W : 0) < 1000;
@@ -1578,14 +1583,12 @@ export default class PlanReview extends View {
           .child(svg(ICON("chevron-right")).size(12).flex_none().text_color(t.dim)))
         .child(div().flex_shrink(1).min_w(0).truncate().font_weight(600).text_color(t.foreground).child(pg.title)))
       .when(!!this.agentChip(c, compact), (x) => x.child(this.agentChip(c, compact)))
-      .when(this.versions().length > 1, (x) => x.child(this.versionSwitcher(c, compact)).child(this.diffToggle(c, compact)))
+      // The sidebar holds the version selector; with it hidden, a small one stays here.
+      .when(this.versions().length > 1 && !this.sidebarOn(), (x) => x.child(this.versionSelect(c, false)))
+      .when(this.versions().length > 1, (x) => x.child(this.diffToggle(c, compact)))
       .child(this.button("page-comment", compact ? null : "Comment on page", () => this.openComposer(null), c, { icon: "message", outline: true, h: 28, px: compact ? 7 : 10, tip: "Comment on the whole page" }))
       .child(this.button("show-resolved", compact ? (resolvedHere ? String(resolvedHere) : null) : `Resolved${resolvedHere ? ` (${resolvedHere})` : ""}`, () => { this.showResolved = !this.showResolved; }, c,
         { icon: this.showResolved ? "eye" : "eye-off", h: 28, px: compact ? 7 : 10, color: this.showResolved ? t.foreground : t.muted, tip: "Show resolved threads (R)" }))
-      .child(div().w(1).h(18).mx(4).bg(t.border))
-      .child(this.button("prev", null, (_e, cx) => this.goto(neighbour(this.plan, this.slug, -1), cx), c, { icon: "chevron-left", px: 6, h: 28, tip: "Previous page ([)" }))
-      .child(div().text_size(12).text_color(t.dim).min_w(40).flex().justify_center().child(`${idx + 1} / ${this.plan.pages.length}`))
-      .child(this.button("next", null, (_e, cx) => this.goto(neighbour(this.plan, this.slug, 1), cx), c, { icon: "chevron-right", px: 6, h: 28, tip: "Next page (])" }))
       .child(div().w(1).h(18).mx(4).bg(t.border))
       .child(this.button("open-browser", null, (_e, cx) => this.openBrowser(cx), c, { icon: "globe", px: 6, h: 28, tip: "Open in browser" }))
       .when(!this.windowed, (x) => x.child(this.button("open-window", null, () => this.openWindow(), c, { icon: "window", px: 6, h: 28, tip: "Open in a window" })))
@@ -1594,33 +1597,44 @@ export default class PlanReview extends View {
         .child(this.button("close-window", null, () => closeOverlay(props()?.overlay), c, { icon: "x", px: 6, h: 28, tip: "Close the window" })));
   }
 
-  // v1 … vN, each with its review state as an icon (hover for the words). A long list shows a
-  // window of it around the shown version, with ‹ › to move one version.
-  versionSwitcher(c, compact) {
+  // The version selector: the shown version with its review state; a press opens the list of
+  // every version, newest first. In the sidebar it is a full-width field, in the top bar (sidebar
+  // hidden) a small button. `plan-review.versions` (V) toggles it.
+  versionSelect(c, full) {
     const { t } = c;
     const list = this.versions();
     const shown = this.doc.pointer.version;
-    const w = switcherWindow(list, shown, compact ? 4 : 6);
-    const step = (id, to, n, tip) => this.button(id, null, (_e, cx) => this.pickVersion(neighbourVersion(list, shown, to), cx), c, { icon: to < 0 ? "chevron-left" : "chevron-right", px: 4, h: 24, tip: `${n} ${tip} version${n === 1 ? "" : "s"}` });
-    return h_flex().id("versions").flex_none().gap(2).items_center().p(2).rounded(8).border_1().border_color(t.border)
-      .when(w.before > 0, (x) => x.child(step("ver-older", -1, w.before, "older")))
-      .children(w.items.map((v) => this.versionChip(v, v.n === shown, c)))
-      .when(w.after > 0, (x) => x.child(step("ver-newer", 1, w.after, "newer")));
-  }
-
-  versionChip(v, on, c) {
-    const { t } = c;
-    const st = VERSION_STATES[v.status];
-    const color = t[st.color] ?? t.dim;
-    const when = v.createdAt ? ` · ${ago(Date.parse(v.createdAt))}` : "";
-    return h_flex().id(`ver-${v.n}`).flex_none().h(24).px(7).gap(4).items_center().rounded(6).cursor_pointer().text_size(12)
-      .when(on, (x) => x.bg(t.selected).text_color(t.foreground).font_weight(600))
-      .when(!on, (x) => x.text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)))
-      .tooltip(`v${v.n} · ${st.label}${when}`)
+    const cur = list.find((v) => v.n === shown);
+    if (!cur) return div();
+    const st = VERSION_STATES[cur.status];
+    const trigger = h_flex().id(full ? "ver-select" : "ver-select-bar").gap(7).items_center().px(full ? 10 : 8).h(full ? 30 : 28).rounded(7).cursor_pointer().text_size(full ? 12.5 : 12)
+      .border_1().border_color(t.input ?? t.border).text_color(t.foreground).hover((s) => s.bg(t.hover))
+      .when(full, (x) => x.w_full()).when(!full, (x) => x.flex_none())
+      .when(this.versionsOpen, (x) => x.bg(t.selected))
+      .tooltip(full ? "Switch version (V)" : `v${shown} · ${st.label} · switch version (V)`)
+      .child(div().flex_none().text_color(t[st.color] ?? t.dim).child(svg(ICON(st.icon)).size(12)))
+      .child(div().flex_none().font_weight(600).child(`v${shown}`))
+      .when(full, (x) => x.child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(st.label)))
+      .child(div().flex_none().text_color(t.dim).child(svg(ICON("chevron-down")).size(12)));
+    const rows = [...list].reverse().map((v) => {
+      const s = VERSION_STATES[v.status];
+      const on = v.n === shown;
+      return h_flex().id(`ver-${v.n}`).w_full().flex_none().h(30).px(8).gap(8).items_center().rounded(6).cursor_pointer().text_size(12.5)
+        .when(on, (x) => x.bg(t.selected).text_color(t.foreground)).when(!on, (x) => x.text_color(t.muted).hover((h) => h.bg(t.hover).text_color(t.foreground)))
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => { cx.stop_propagation(); this.versionsOpen = false; this.pickVersion(v.n, cx); this.handle.focus(); })
+        .child(div().flex_none().text_color(t[s.color] ?? t.dim).child(svg(ICON(s.icon)).size(12)))
+        .child(div().flex_none().w(26).font_weight(on ? 650 : 500).child(`v${v.n}`))
+        .child(div().flex_1().min_w(0).truncate().child(s.label))
+        .child(div().flex_none().text_size(11).text_color(t.dim).child(v.createdAt ? ago(Date.parse(v.createdAt)) : ""))
+        .child(div().flex_none().w(12).text_color(t.accent).child(on ? svg(ICON("check")).size(12) : ""));
+    });
+    const panel = v_flex().id("ver-list").w(288).max_h(360).overflow_y_scrollbar().p(4).gap(1).rounded(9).bg(t.popover ?? t.surface).border_1().border_color(t.border).shadow_lg()
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .on_click((_e, cx) => { cx.stop_propagation(); this.pickVersion(v.n, cx); })
-      .child(div().flex_none().text_color(color).child(svg(ICON(st.icon)).size(11)))
-      .child(`v${v.n}`);
+      .children(rows);
+    return Popover.new(full ? "ver-pop" : "ver-pop-bar").open(!!this.versionsOpen).anchor(full ? "top_left" : "top_right")
+      .on_open_change((open, cx) => { this.versionsOpen = open; this.touch(cx); })
+      .trigger(trigger).content(panel);
   }
 
   diffToggle(c, compact) {
@@ -1821,7 +1835,7 @@ export default class PlanReview extends View {
     if (page.diff) this.diffDisplay(page.dp);
     const mainW = this.width - (this.sidebarOn() ? SIDEBAR_W : 0);
     const marginMode = mainW - 2 * PAD - MARGIN_W - GAP >= TEXT_MIN;
-    const textW = Math.max(300, Math.min(TEXT_MAX, mainW - 2 * PAD - (marginMode ? MARGIN_W + GAP : 0)));
+    const textW = Math.max(300, mainW - 2 * PAD - (marginMode ? MARGIN_W + GAP : 0));
     const contentW = textW + (marginMode ? MARGIN_W + GAP : 0) + 2 * PAD;
     // The text width reaches the units through tintSig (images are sized to it).
     if (this.textW !== textW) { this.textW = textW; this.wakeHost(); }
