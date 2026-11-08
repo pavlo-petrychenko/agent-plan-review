@@ -1543,11 +1543,7 @@ export default class PlanReview extends View {
     const crumbs = ancestors(this.plan, this.slug);
     const resolvedHere = this.threadsHere().filter((x) => x.status !== "open").length;
     const compact = this.width - (this.sidebarOn() ? SIDEBAR_W : 0) < 1000;
-    const stack = !this.windowed && this.hasStack();
     return h_flex().id("topbar").w_full().h(46).flex_none().px(12).gap(6).items_center().border_b(1).border_color(t.border).bg(t.background)
-      .when(stack, (x) => x
-        .child(this.button("back-to-agent", "Agent", () => this.flipBack(), c, { icon: "chevron-left", outline: true, h: 28, px: 8, tip: "Back to the agent (⌘⇧R)" }))
-        .child(div().w(1).h(18).mx(2).bg(t.border)))
       .child(this.button("toggle-sidebar", null, () => { this.sidebar = !this.sidebarOn(); }, c, { icon: "sidebar", iconSize: 15, px: 6, h: 28, tip: "Toggle page tree" }))
       .child(h_flex().flex_1().min_w(0).overflow_hidden().gap(6).items_center().text_size(13)
         .when(crumbs.length > 1, (x) => x.child(div().flex_none().text_color(t.dim).child("…")).child(svg(ICON("chevron-right")).size(12).flex_none().text_color(t.dim)))
