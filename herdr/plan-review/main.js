@@ -16,7 +16,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea } from "gpui-base";
 import { props, theme, settings, appHome, readTextFile, exec, notify, watchFolder, nextCommand, run, setShared, openOverlay, closeOverlay, focused, panes, shared, layout } from "herdr";
-import { planFromDocs, neighbour, ancestors, treeRows } from "./plan.js";
+import { planFromDocs, planWithRemoved, pageOr, neighbour, ancestors, treeRows } from "./plan.js";
 import { parsePage, wordText } from "./markdown.js";
 import { range, inRange, extend, flowRange, rangeText, tintMap, threadAt } from "./selection.js";
 import { threadsFromComments, anchorOf, openCounts, layoutMargin, ago } from "./threads.js";
@@ -25,6 +25,8 @@ import { POINTER_DIR, IMAGE_DIR, STACK, AGENT_VIEW, PLAN_VIEW, VIEW_KEY, STATES,
 import { parseInstall, serverUrl, reviewPageUrl, startScript, pollDelay } from "./server.js";
 import { createApi } from "./api.js";
 import { delivery, withDelivery, sentLabel, decisionState } from "./review.js";
+import { buildDiffPage, collapseRows, removedRowOf } from "./diff.js";
+import { VERSION_STATES, PAGE_MARKS, versionList, shownVersion, pointerFor, diffBase, stepBase, switcherWindow, neighbourVersion, diffIndex } from "./versions.js";
 
 const MOD = "mods/plan-review";
 const ICON = (n) => `${MOD}/icons/${n}.svg`;
@@ -37,6 +39,7 @@ const TEXT_MIN = 460;
 const BASE = 15;
 const LINE = 26;
 const COMPOSER = "__composer";
+const GAP_H = 30; // a folded run of unchanged lines in a diff
 // Herdr's bundled UI font draws no bold or italic; the system font has both.
 const PROSE_FONT = ".SystemUIFont";
 const IMAGE_RE = /(?:^|\/)api\/images\/([A-Za-z0-9._-]+)$/;
@@ -101,6 +104,11 @@ export default class PlanReview extends View {
     this.winTop = new Map(); // page → top of the mounted window, from the scroll position
     this.subH = new Map(); // list item and table row heights, for anchoring cards
     this.cardH = new Map();
+    this.projects = new Map(); // project key → { list: [version + review state], raw }
+    this.vpick = new Map(); // terminal → { n, follow }: the version picked while the pointer names `follow`
+    this.diffOn = false; // diff mode: the shown version against an earlier one
+    this.baseOf = new Map(); // terminal → the chosen base version
+    this.allExpanded = false; // diff mode: every unchanged line shown
 
     // Units are made outside render: render asks for them, this task makes them (a few per frame).
     // It also loads the plan render asked for, and redraws this view for handlers that run in a
@@ -111,6 +119,7 @@ export default class PlanReview extends View {
         this.wakePending = false;
         await sleep(cx, 0);
         if (this.wantDoc) { const t = this.wantDoc; this.wantDoc = null; await this.ensureDoc(t, cx); }
+        if (this.wantDiff) { const w = this.wantDiff; this.wantDiff = null; await this.ensureDiff(w, cx); }
         if (this.startProps && this.doc?.plan && this.page()) this.applyStartProps();
         if (this.doc?.plan && this.slug && this.ui?.key !== this.pageKey()) this.prepareUnits(cx);
         else if (this.ui && this.ui.next < this.ui.units.length) this.createUnits(cx, 1500);
@@ -173,10 +182,21 @@ export default class PlanReview extends View {
   // ---------------------------------------------------------------------------- data
 
   // The doc's fields, read through the view so the drawing code does not care which plan it is.
-  get plan() { return this.doc?.plan ?? null; }
+  get plan() { return this.diffMode()?.plan ?? this.doc?.plan ?? null; }
   get slug() { return this.doc?.slug ?? null; }
   set slug(v) { if (this.doc) this.doc.slug = v; }
-  get threads() { return this.doc?.threads ?? []; }
+  get threads() {
+    const d = this.doc;
+    if (!d) return [];
+    // In a diff the words are the diff's, so threads are placed on those.
+    const dp = this.diffPage();
+    if (!dp) return d.threads;
+    if (dp.thr?.src !== d.threads) {
+      const wordsOf = (slug) => (slug === this.slug ? dp.words : d.plan.bySlug.has(slug) ? this.parsedIn(d, slug).words : null);
+      dp.thr = { src: d.threads, list: threadsFromComments(d.comments, wordsOf) };
+    }
+    return dp.thr.list;
+  }
   get images() { return this.doc?.images ?? new Map(); }
   get review() { return this.doc?.review ?? null; }
 
@@ -211,11 +231,99 @@ export default class PlanReview extends View {
 
   /** The agent and pointer to show: { terminal, pointer } or null. */
   target() {
+    let t;
     if (this.fixed) {
       const ptr = this.pointers.get(this.fixed);
-      return ptr ? { terminal: this.fixed, pointer: ptr } : null;
+      t = ptr ? { terminal: this.fixed, pointer: ptr } : null;
+    } else t = planFor(this.pointers, focused(), panes());
+    if (!t) return null;
+    // A version picked in the switcher holds while the pointer still names the newest one the
+    // pick was made on; a newer plan from the agent brings the newest version back.
+    const newest = t.pointer.version;
+    const pick = this.vpick.get(t.terminal);
+    if (pick && pick.follow !== newest) this.vpick.delete(t.terminal);
+    const list = this.versions(t.pointer.projectKey);
+    return { terminal: t.terminal, pointer: pointerFor(t.pointer, shownVersion(newest, this.vpick.get(t.terminal), list), list), newest };
+  }
+
+  /** The project's versions with their review state, oldest first (empty until loaded). The shown version takes its live review. */
+  versions(key = this.doc?.pointer.projectKey) {
+    const list = this.projects.get(key)?.list ?? [];
+    const d = this.doc;
+    if (!d?.review || d.pointer.projectKey !== key) return list;
+    return list.map((v) => (v.n === d.pointer.version && d.review.status in VERSION_STATES ? { ...v, status: d.review.status } : v));
+  }
+
+  /** Shows version n of the plan (null: ignored); the page stays when it exists there. */
+  pickVersion(n, cx) {
+    const t = this.target();
+    if (n == null || !t || n === t.pointer.version) return;
+    if (n === t.newest) this.vpick.delete(t.terminal); else this.vpick.set(t.terminal, { n, follow: t.newest });
+    const keep = this.slug;
+    const next = this.target();
+    const d2 = next && this.docs.get(this.docKey(next.pointer));
+    if (d2?.plan) {
+      d2.slug = pageOr(d2.plan, keep);
+      cx.spawn((cx) => this.refreshDoc(d2, cx, { force: true }));
+    } else this.startPage = keep;
+    this.wakeHost();
+    this.touch(cx);
+  }
+
+  toggleDiff(cx) {
+    this.diffOn = !this.diffOn;
+    this.sel = this.pill = this.press = null;
+    this.closeComposer();
+    if (!this.diffOn && this.doc?.plan) this.slug = pageOr(this.doc.plan, this.slug);
+    this.active = null;
+    this.wakeHost();
+    this.touch(cx);
+  }
+
+  /** The version a diff of the shown one compares with, or null (the first version has none). */
+  diffBaseOf(d = this.doc) {
+    if (!d) return null;
+    return diffBase(d.pointer.version, this.baseOf.get(this.terminal), this.versions(d.pointer.projectKey));
+  }
+
+  stepDiffBase(step, cx) {
+    const d = this.doc;
+    const base = this.diffBaseOf();
+    if (!d || base == null) return;
+    this.baseOf.set(this.terminal, stepBase(d.pointer.version, base, step, this.versions()));
+    this.sel = this.pill = this.press = null;
+    this.closeComposer();
+    this.active = null;
+    this.wakeHost();
+    this.touch(cx);
+  }
+
+  /** The loaded diff of the shown version against its base, when diff mode is on; else null. */
+  diffMode() {
+    const d = this.doc;
+    if (!this.diffOn || !d?.plan) return null;
+    const base = this.diffBaseOf(d);
+    const x = base == null ? null : d.diffs.get(base);
+    return x?.index ? x : null;
+  }
+
+  /** The diff of the shown page: { rows, words, stats, status, page }. */
+  diffPage() {
+    const df = this.diffMode();
+    if (!df || !this.slug) return null;
+    let dp = df.pages.get(this.slug);
+    if (!dp) {
+      const status = df.index.status.get(this.slug) ?? "unchanged";
+      const pg = this.doc.plan.bySlug.get(this.slug);
+      const now = pg ? pg.lines.join("\n") : "";
+      const before = status === "added" ? "" : df.index.from.has(this.slug) ? df.index.from.get(this.slug) : now;
+      dp = buildDiffPage(before, status === "removed" ? "" : now);
+      dp.status = status;
+      dp.base = df.base;
+      dp.page = { words: dp.words, blocks: [], diff: true, dp };
+      df.pages.set(this.slug, dp);
     }
-    return planFor(this.pointers, focused(), panes());
+    return dp;
   }
 
   /** Whether this copy is on screen (polling pauses when not). */
@@ -261,6 +369,8 @@ export default class PlanReview extends View {
     else if (c === "next" || c === "prev") this.goto(neighbour(this.plan, this.slug, c === "next" ? 1 : -1), cx);
     else if (c === "resolved") this.showResolved = !this.showResolved;
     else if (c === "browser") this.openBrowser(cx);
+    else if (c === "diff") this.toggleDiff(cx);
+    else if (c === "prev-version" || c === "next-version") this.pickVersion(neighbourVersion(this.versions(), this.doc.pointer.version, c === "next-version" ? 1 : -1), cx);
   }
 
   sidebarOn() { return this.sidebar ?? this.width >= 1000; }
@@ -277,7 +387,7 @@ export default class PlanReview extends View {
     const key = this.docKey(t.pointer);
     let d = this.docs.get(key);
     if (d && (d.plan || d.loading)) return d;
-    if (!d) { d = { key, pointer: t.pointer, pages: new Map(), images: new Map(), slug: null, plan: null, threads: [], ver: 0 }; this.docs.set(key, d); }
+    if (!d) { d = { key, pointer: t.pointer, pages: new Map(), images: new Map(), diffs: new Map(), slug: null, plan: null, threads: [], comments: [], ver: 0 }; this.docs.set(key, d); }
     d.loading = true;
     d.error = null;
     d.pointer = t.pointer;
@@ -287,8 +397,9 @@ export default class PlanReview extends View {
       const { pointer } = d;
       const [pl, review, comments] = await Promise.all([
         d.api.plan(pointer.projectKey, pointer.version),
-        d.api.review(pointer.reviewId).catch((e) => { if (e.down) throw e; return null; }),
+        pointer.reviewId ? d.api.review(pointer.reviewId).catch((e) => { if (e.down) throw e; return null; }) : null,
         d.api.comments(pointer.projectKey, pointer.version),
+        this.loadProject(d.api, pointer.projectKey),
       ]);
       d.plan = planFromDocs(pl.docs, pl.root);
       d.ver++;
@@ -320,14 +431,14 @@ export default class PlanReview extends View {
     }
     try {
       const [review, comments] = await Promise.all([
-        d.api.review(d.pointer.reviewId).catch((e) => { if (e.down) throw e; return d.review; }),
+        d.pointer.reviewId ? d.api.review(d.pointer.reviewId).catch((e) => { if (e.down) throw e; return d.review; }) : null,
         d.api.comments(d.pointer.projectKey, d.pointer.version),
       ]);
       const wasDown = this.server.down;
       this.server.down = false;
       const rr = JSON.stringify(review), cr = JSON.stringify(comments);
       if (!force && !wasDown && rr === d.reviewRaw && cr === d.commentsRaw) return;
-      if (rr !== d.reviewRaw) { d.review = review; d.reviewRaw = rr; }
+      if (rr !== d.reviewRaw) { d.review = review; d.reviewRaw = rr; await this.loadProject(d.api, d.pointer.projectKey); }
       if (cr !== d.commentsRaw || force) { d.commentsRaw = cr; this.setThreads(d, comments); }
       this.touch(cx);
     } catch (e) {
@@ -335,7 +446,32 @@ export default class PlanReview extends View {
     }
   }
 
+  /** The project's versions and their reviews (the switcher). Errors leave the old list. */
+  async loadProject(api, key) {
+    const [proj, reviews] = await Promise.all([api.project(key).catch((e) => { if (e.down) throw e; return null; }), api.reviewsOf(key).catch((e) => { if (e.down) throw e; return []; })]);
+    if (!proj) return;
+    const list = versionList(proj.versions, reviews);
+    const raw = JSON.stringify(list);
+    if (this.projects.get(key)?.raw !== raw) this.projects.set(key, { list, raw });
+  }
+
+  /** Loads the diff of a doc's version against `base` once: the page-by-page changes. */
+  async ensureDiff({ d, base }, cx) {
+    if (!d?.api || d.diffs.has(base)) return;
+    d.diffs.set(base, { loading: true });
+    try {
+      const index = diffIndex(await d.api.diff(d.pointer.projectKey, base, d.pointer.version));
+      d.diffs.set(base, { base, index, plan: planWithRemoved(d.plan, index.removed), pages: new Map() });
+    } catch (e) {
+      d.diffs.delete(base);
+      if (e?.down) this.server.down = true;
+      else { this.diffOn = false; notify({ title: "Could not load the changes", body: e?.message ?? String(e), level: "error", timeout: 4500 }); }
+    }
+    this.touch(cx);
+  }
+
   setThreads(d, comments) {
+    d.comments = comments;
     d.threads = threadsFromComments(comments, (slug) => (d.plan.bySlug.has(slug) ? this.parsedIn(d, slug).words : null));
     if (d === this.doc) {
       this.storeVersion++;
@@ -353,7 +489,12 @@ export default class PlanReview extends View {
 
   parsed(slug) { return this.parsedIn(this.doc, slug); }
 
-  page() { return this.doc?.plan && this.slug ? this.parsed(this.slug) : null; }
+  page() {
+    if (!this.doc?.plan || !this.slug) return null;
+    const dp = this.diffPage();
+    if (dp) return dp.page;
+    return this.doc.plan.bySlug.has(this.slug) ? this.parsed(this.slug) : null;
+  }
 
   threadsHere() {
     const order = (t) => (t.kind === "page" ? -1 : t.words ? t.words[0] : 1e9);
@@ -473,7 +614,13 @@ export default class PlanReview extends View {
 
   // ---------------------------------------------------------------------------- units
 
-  pageKey() { return `${this.doc?.key}#${this.slug}#${this.doc?.ver}`; }
+  pageKey() {
+    const df = this.diffMode();
+    return `${this.doc?.key}#${this.slug}#${this.doc?.ver}${df ? `#d${df.base}` : ""}`;
+  }
+
+  // The key of the scroll area and the window position: a diff scrolls on its own.
+  viewKey() { return this.diffMode() ? `${this.slug}~d` : this.slug; }
 
   // Made in a handler or a task (never in render): the first ~1,500 words now, the rest a chunk per frame.
   prepareUnits(cx) {
@@ -482,10 +629,14 @@ export default class PlanReview extends View {
     this.releaseUnits();
     const page = this.page();
     if (!page) return;
-    const { units, wordUnit } = makeUnits(page.blocks, page.words.length);
+    // A diff page: one unit per row (removed rows too), so heights are measured per row and a
+    // selection step redraws only the rows whose words changed tint.
+    const { units, wordUnit } = page.diff
+      ? { units: page.dp.rows.map((_r, k) => ({ id: k, block: k, kind: "row", from: 0, to: 0 })), wordUnit: Int32Array.from(page.words, (w) => w.row) }
+      : makeUnits(page.blocks, page.words.length);
     const size = new Int32Array(units.length);
     for (const u of wordUnit) if (u >= 0) size[u]++;
-    this.ui = { key, units, wordUnit, size, byBlock: unitsByBlock(units), ents: new Map(), next: 0, weights: new Map(), h: new Float64Array(units.length).fill(-1) };
+    this.ui = { key, units, wordUnit, size, byBlock: page.diff ? null : unitsByBlock(units), diff: !!page.diff, ents: new Map(), next: 0, weights: new Map(), h: new Float64Array(units.length).fill(-1) };
     this.lastSig = this.tintSig();
     this.createUnits(cx, 1500);
   }
@@ -750,6 +901,7 @@ export default class PlanReview extends View {
     const step = k === "]" || k === "alt-down" || k === "j" ? 1 : k === "[" || k === "alt-up" || k === "k" ? -1 : 0;
     if (step) { this.goto(neighbour(this.plan, this.slug, step), cx); cx.stop_propagation(); return this.touch(cx); }
     if (k === "r") { this.showResolved = !this.showResolved; return this.touch(cx); }
+    if (k === "d") { this.toggleDiff(cx); cx.stop_propagation(); return this.touch(cx); }
   }
 
   // ---------------------------------------------------------------------------- colours
@@ -950,6 +1102,7 @@ export default class PlanReview extends View {
   unitElement(key, id) {
     const ui = this.ui;
     if (!ui || ui.key !== key || !this.page()) return div();
+    if (ui.diff) return this.diffRowElement(id, this.renderCtx());
     const u = ui.units[id];
     const b = this.page().blocks[u.block];
     const ctx = this.renderCtx();
@@ -958,6 +1111,107 @@ export default class PlanReview extends View {
     if (b.type === "code") return this.codePart(b, u.from, u.to, ctx);
     return this.block(b, ctx);
   }
+
+  // ---------------------------------------------------------------------------- diff
+
+  // One row of a diff: line numbers, a +/- mark, and the line. Rows on the new side are drawn
+  // word by word like the plan, so they select and comment the same way; removed rows are text.
+  diffRowElement(id, ctx) {
+    const dp = this.diffPage();
+    const row = dp?.rows[id];
+    if (!row) return div();
+    const { c } = ctx;
+    const { t } = c;
+    const size = 12.5;
+    const tint = row.kind === "add" ? t.ansi2 + "1c" : row.kind === "del" ? t.ansi1 + "1c" : null;
+    const num = (n) => div().w(36).flex_none().text_right().text_size(11).line_height("20px").text_color(t.dim).child(n == null ? "" : String(n));
+    const mark = row.kind === "add" ? "+" : row.kind === "del" ? "−" : "";
+    const words = dp.words;
+    const sub = { ...ctx, size };
+    const body = row.kind === "del"
+      ? div().flex_1().min_w(0).text_size(size).line_height("20px").text_color(t.muted).child(row.text.trim() ? row.text : " ")
+      : h_flex().flex_1().min_w(0).flex_wrap().items_center().text_size(size).line_height("20px")
+        .when(!!row.indent, (x) => x.child(div().flex_none().child(row.indent)))
+        .when(!row.count, (x) => x.child(div().child(" ")))
+        .children(words.slice(row.first, row.first + row.count).map((w) => this.word(w, words, sub)));
+    return h_flex().w_full().items_start().gap(6).px(8).py(1).font_family(c.mono)
+      .when(!!tint, (x) => x.bg(tint))
+      .child(num(row.oldLine)).child(num(row.newLine))
+      .child(div().w(12).flex_none().text_size(size).line_height("20px").text_color(row.kind === "add" ? t.ansi2 : t.ansi1).child(mark))
+      .child(body);
+  }
+
+  // What the diff page shows: its rows with long unchanged runs folded into one "expand" entry.
+  diffDisplay(dp) {
+    const key = `${dp.xver ?? 0}|${this.allExpanded}`;
+    if (dp.dispKey !== key) {
+      dp.dispKey = key;
+      dp.expanded ??= new Set();
+      dp.disp = collapseRows(dp.rows, this.allExpanded ? new Set(dp.rows.map((_r, k) => k)) : dp.expanded);
+      dp.rowDisp = new Int32Array(dp.rows.length);
+      dp.disp.forEach((e, k) => { if (e.gap) for (let r = e.from; r < e.to; r++) dp.rowDisp[r] = k; else dp.rowDisp[e.row] = k; });
+      dp.tops = null;
+    }
+    return dp.disp;
+  }
+
+  diffH(dp, row) {
+    const m = this.ui?.h[row];
+    if (m >= 0) return m;
+    const per = Math.max(20, Math.floor(((this.textW ?? TEXT_MAX) - 130) / 7.6));
+    return Math.max(1, Math.ceil((dp.rows[row].text.length + 1) / per)) * 20 + 2;
+  }
+
+  gapRow(dp, e, c) {
+    const { t } = c;
+    return h_flex().id(`gap-${e.from}`).w_full().h(GAP_H).flex_none().px(10).gap(8).items_center().cursor_pointer().bg(t.chrome).text_size(12).text_color(t.dim)
+      .border_t(1).border_b(1).border_color(t.border)
+      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); dp.expanded.add(e.from); dp.xver = (dp.xver ?? 0) + 1; this.touch(cx); })
+      .child(svg(ICON("unfold")).size(13))
+      .child(`${e.count} unchanged line${e.count === 1 ? "" : "s"}`)
+      .child(div().flex_1())
+      .child(div().text_color(t.accent).child("Expand"));
+  }
+
+  // The rows of the diff page as mounted elements (only those near the viewport on a long
+  // one; the rest are spacers of their height). Fills `out`; false while a row that should be
+  // mounted has no view yet. Sets `dp.tops` (the y of every entry) for margin cards.
+  diffBlocks(dp, c, win, after, out) {
+    const ui = this.ui;
+    const disp = this.diffDisplay(dp);
+    const tops = new Float64Array(disp.length + 1);
+    let y = 0, spacer = 0, complete = true;
+    const flush = () => { if (spacer > 0) { out.push(div().w_full().h(spacer)); spacer = 0; } };
+    for (let k = 0; k < disp.length; k++) {
+      const e = disp[k];
+      tops[k] = y;
+      const h = e.gap ? GAP_H : this.diffH(dp, e.row);
+      y += h;
+      if (!complete) continue;
+      const shown = y >= win.lo && y - h <= win.hi;
+      if (!shown && !after.has(k)) { spacer += h; continue; }
+      let el;
+      if (e.gap) el = this.gapRow(dp, e, c);
+      else if (!shown) el = div().w_full().h(h);
+      else {
+        const ent = ui.ents.get(e.row);
+        if (!ent) { complete = false; continue; }
+        const row = e.row;
+        el = div().w_full().on_size_change((sz, _cx) => { if (this.ui === ui) ui.h[row] = sz.height; }).child(ent);
+      }
+      flush();
+      out.push(el);
+      if (after.has(k)) out.push(v_flex().w_full().py(10).gap(10).children(after.get(k)));
+    }
+    tops[disp.length] = y;
+    flush();
+    dp.tops = tops;
+    return complete;
+  }
+
+  diffRowTop(dp, row) { return dp.tops && dp.rowDisp ? dp.tops[dp.rowDisp[row]] ?? 0 : 0; }
 
   // A block on the page: its frame (table border, code box) around its units. Only units near
   // the visible part of the page are mounted; the others are empty boxes of their height, so
@@ -1013,7 +1267,7 @@ export default class PlanReview extends View {
     const off = Math.max(0, viewTop - this.rowY - delta);
     const step = Math.max(200, (this.viewH ?? 800) / 2);
     const top = Math.floor(off / step) * step;
-    if ((this.winTop.get(this.slug) ?? 0) !== top) { this.winTop.set(this.slug, top); cx.notify(); }
+    if ((this.winTop.get(this.viewKey()) ?? 0) !== top) { this.winTop.set(this.viewKey(), top); cx.notify(); }
   }
 
   measureSub(key, h) {
@@ -1035,8 +1289,10 @@ export default class PlanReview extends View {
   // The y of word i in the text column: its block's top, plus the list item, table row or code
   // line it sits in. Inside a paragraph the line is unknown, so it is the paragraph's top.
   anchorY(i) {
-    const w = this.page().words[i];
-    const b = this.page().blocks[w.block];
+    const page = this.page();
+    const w = page.words[i];
+    if (page.diff) return this.diffRowTop(page.dp, w.row);
+    const b = page.blocks[w.block];
     let y = this.blockTop(w.block);
     const sub = (n) => this.subH.get(`${this.slug}:${b.line}:${n}`) ?? 26;
     if (b.type === "list") {
@@ -1087,6 +1343,7 @@ export default class PlanReview extends View {
       .when(!opts.primary && !opts.danger && !opts.outline, (x) => x.text_color(opts.color ?? t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)))
       .when(!!opts.icon, (x) => x.child(svg(ICON(opts.icon)).size(opts.iconSize ?? 13)))
       .when(label != null, (x) => x.child(label))
+      .when(!!opts.active, (x) => x.bg(t.selected))
       .when(!!opts.tip, (x) => x.tooltip(opts.tip))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((e, cx) => { cx.stop_propagation(); if (off) return; onClick(e, cx); this.touch(cx); });
@@ -1196,12 +1453,24 @@ export default class PlanReview extends View {
     return this.threadsHere().filter((th) => th.status === "open" || this.showResolved || th.id === this.active);
   }
 
+  // In a diff, a thread on a line the diff shows as removed sits at that row; elsewhere 0.
+  removedRow(th) {
+    const page = this.page();
+    if (!page?.diff || th.side !== "old") return null;
+    return removedRowOf({ side: th.side, line: th.lines?.[0], baseVersion: th.baseVersion }, page.dp.rows, page.dp.base);
+  }
+
+  removedY(th) {
+    const r = this.removedRow(th);
+    return r == null ? 0 : this.diffRowTop(this.page().dp, r);
+  }
+
   // Cards in the right margin, each at its anchor's y; overlaps pushed apart.
   margin(c) {
     const items = [];
     const cards = new Map();
     for (const th of this.visibleThreads()) {
-      const y = th.kind === "page" || !th.words || th.detached ? 0 : this.anchorY(th.words[0]);
+      const y = th.kind === "page" ? 0 : th.words && !th.detached ? this.anchorY(th.words[0]) : this.removedY(th);
       items.push({ id: th.id, y, h: this.cardH.get(th.id) ?? 110 });
       cards.set(th.id, this.card(th, c));
     }
@@ -1231,21 +1500,25 @@ export default class PlanReview extends View {
     const counts = openCounts(this.threads);
     const rows = treeRows(this.plan);
     const d = this.doc;
+    const df = this.diffMode();
     return v_flex().id("sidebar").when(this.windowed, (x) => x.on_mouse_down("left", (_e, cx) => cx.stop_propagation())).w(SIDEBAR_W).flex_none().h_full().bg(t.chrome).border_r(1).border_color(t.border)
       .child(v_flex().px(16).pt(16).pb(12).gap(4)
         .child(h_flex().gap(6).items_center().text_size(10.5).font_weight(600).text_color(t.dim).child(svg(ICON("file")).size(12)).child("PLAN"))
         .child(div().text_size(14).font_weight(600).line_height("19px").text_color(t.foreground).child(this.plan.title))
-        .child(div().text_size(11.5).text_color(t.dim).truncate().child(`v${d.pointer.version} · ${this.plan.pages.length} page${this.plan.pages.length === 1 ? "" : "s"}${d.pointer.cwd ? ` · ${d.pointer.cwd.split("/").pop()}` : ""}`)))
+        .child(div().text_size(11.5).text_color(t.dim).truncate().child(`v${d.pointer.version}${df ? ` vs v${df.base}` : ""} · ${this.plan.pages.length} page${this.plan.pages.length === 1 ? "" : "s"}${d.pointer.cwd ? ` · ${d.pointer.cwd.split("/").pop()}` : ""}`)))
       .child(v_flex().id("tree").flex_1().min_h(0).overflow_y_scrollbar().px(8).pb(8).gap(1)
         .children(rows.map((r) => {
           const on = r.slug === this.slug;
           const n = counts.get(r.slug) ?? 0;
+          const status = df?.index.status.get(r.slug);
+          const mark = PAGE_MARKS[status];
           return h_flex().id(`tree-${r.slug}`).w_full().h(30).pr(8).gap(6).items_center().rounded(6).cursor_pointer()
             .when(on, (x) => x.bg(t.selected)).when(!on, (x) => x.hover((s) => s.bg(t.hover)))
             .on_click((_e, cx) => { this.goto(r.slug, cx); this.handle.focus(); this.touch(cx); })
             .child(div().w(3).h(16).flex_none().rounded(2).when(on, (x) => x.bg(t.accent)))
             .child(h_flex().flex_none().h_full().children(r.guides.slice(1).map((_, g) => div().w(14).h_full())).when(r.depth > 0, (x) => x.child(div().w(12).h_full().flex().items_center().child(div().w(6).h(1).bg(t.border)))))
-            .child(div().flex_1().min_w(0).truncate().text_size(13).text_color(on ? t.foreground : r.depth === 0 ? t.foreground : t.muted).when(on || r.depth === 0, (x) => x.font_weight(600)).child(r.title))
+            .child(div().flex_1().min_w(0).truncate().text_size(13).text_color(status === "removed" ? t.dim : on ? t.foreground : r.depth === 0 ? t.foreground : t.muted).when(on || r.depth === 0, (x) => x.font_weight(600)).when(status === "removed", (x) => x.line_through()).child(r.title))
+            .when(!!mark, (x) => x.child(div().id(`mark-${r.slug}`).flex_none().text_color(t[mark.color]).tooltip(mark.label).child(svg(ICON(mark.icon)).size(12))))
             .when(n > 0, (x) => x.child(div().flex_none().min_w(18).h(18).px(5).rounded(9).flex().items_center().justify_center().text_size(10.5).font_weight(600)
               .bg(on ? t.ansi3 : t.ansi3 + "33").text_color(on ? t.background : t.ansi3).child(String(n))));
         })))
@@ -1285,6 +1558,7 @@ export default class PlanReview extends View {
           .child(svg(ICON("chevron-right")).size(12).flex_none().text_color(t.dim)))
         .child(div().flex_shrink(1).min_w(0).truncate().font_weight(600).text_color(t.foreground).child(pg.title)))
       .when(!!this.agentChip(c, compact), (x) => x.child(this.agentChip(c, compact)))
+      .when(this.versions().length > 1, (x) => x.child(this.versionSwitcher(c, compact)).child(this.diffToggle(c, compact)))
       .child(this.button("page-comment", compact ? null : "Comment on page", () => this.openComposer(null), c, { icon: "message", outline: true, h: 28, px: compact ? 7 : 10, tip: "Comment on the whole page" }))
       .child(this.button("show-resolved", compact ? (resolvedHere ? String(resolvedHere) : null) : `Resolved${resolvedHere ? ` (${resolvedHere})` : ""}`, () => { this.showResolved = !this.showResolved; }, c,
         { icon: this.showResolved ? "eye" : "eye-off", h: 28, px: compact ? 7 : 10, color: this.showResolved ? t.foreground : t.muted, tip: "Show resolved threads (R)" }))
@@ -1300,12 +1574,81 @@ export default class PlanReview extends View {
         .child(this.button("close-window", null, () => closeOverlay(props()?.overlay), c, { icon: "x", px: 6, h: 28, tip: "Close the window" })));
   }
 
+  // v1 … vN, each with its review state as an icon (hover for the words). A long list shows a
+  // window of it around the shown version, with ‹ › to move one version.
+  versionSwitcher(c, compact) {
+    const { t } = c;
+    const list = this.versions();
+    const shown = this.doc.pointer.version;
+    const w = switcherWindow(list, shown, compact ? 4 : 6);
+    const step = (id, to, n, tip) => this.button(id, null, (_e, cx) => this.pickVersion(neighbourVersion(list, shown, to), cx), c, { icon: to < 0 ? "chevron-left" : "chevron-right", px: 4, h: 24, tip: `${n} ${tip} version${n === 1 ? "" : "s"}` });
+    return h_flex().id("versions").flex_none().gap(2).items_center().p(2).rounded(8).border_1().border_color(t.border)
+      .when(w.before > 0, (x) => x.child(step("ver-older", -1, w.before, "older")))
+      .children(w.items.map((v) => this.versionChip(v, v.n === shown, c)))
+      .when(w.after > 0, (x) => x.child(step("ver-newer", 1, w.after, "newer")));
+  }
+
+  versionChip(v, on, c) {
+    const { t } = c;
+    const st = VERSION_STATES[v.status];
+    const color = t[st.color] ?? t.dim;
+    const when = v.createdAt ? ` · ${ago(Date.parse(v.createdAt))}` : "";
+    return h_flex().id(`ver-${v.n}`).flex_none().h(24).px(7).gap(4).items_center().rounded(6).cursor_pointer().text_size(12)
+      .when(on, (x) => x.bg(t.selected).text_color(t.foreground).font_weight(600))
+      .when(!on, (x) => x.text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)))
+      .tooltip(`v${v.n} · ${st.label}${when}`)
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); this.pickVersion(v.n, cx); })
+      .child(div().flex_none().text_color(color).child(svg(ICON(st.icon)).size(11)))
+      .child(`v${v.n}`);
+  }
+
+  diffToggle(c, compact) {
+    const { t } = c;
+    const base = this.diffBaseOf();
+    const on = this.diffOn && base != null;
+    return this.button("diff-toggle", compact ? null : "Diff", (_e, cx) => this.toggleDiff(cx), c,
+      { icon: "diff", outline: true, h: 28, px: compact ? 7 : 10, active: on, color: on ? t.foreground : t.muted, disabled: base == null,
+        tip: base == null ? "No earlier version to compare with" : on ? "Back to the plan (D)" : `Show what changed since v${base} (D)` });
+  }
+
+  // Under the top bar in diff mode: what is compared, the totals, and the unchanged-lines switch.
+  diffbar(c) {
+    const { t } = c;
+    const d = this.doc;
+    const base = this.diffBaseOf();
+    const df = this.diffMode();
+    const dp = this.diffPage();
+    const list = this.versions();
+    const bv = list.find((v) => v.n === base);
+    const st = VERSION_STATES[bv?.status ?? "none"];
+    const older = stepBase(d.pointer.version, base, -1, list), newer = stepBase(d.pointer.version, base, 1, list);
+    const stat = (n, sign, color) => div().flex_none().font_family(c.mono).text_size(11.5).font_weight(600).text_color(n ? color : t.dim).child(`${sign}${n}`);
+    const pageChip = dp && ({ added: ["New page", t.ansi2], removed: ["Page removed", t.ansi1], unchanged: ["Page unchanged", t.dim] })[dp.status];
+    const folds = dp ? dp.rows.some((r) => r.kind === "eq") : false;
+    return h_flex().id("diffbar").w_full().h(34).flex_none().px(16).gap(8).items_center().border_b(1).border_color(t.border).bg(t.chrome).text_size(12).text_color(t.muted)
+      .child(svg(ICON("diff")).size(13).flex_none())
+      .child(div().flex_none().child(`v${d.pointer.version} compared with`))
+      .child(this.button("base-older", null, (_e, cx) => this.stepDiffBase(-1, cx), c, { icon: "chevron-left", px: 4, h: 22, disabled: older === base, tip: "Compare with an older version" }))
+      .child(h_flex().flex_none().gap(4).items_center().px(6).h(22).rounded(5).bg(t.hover).text_color(t.foreground).font_weight(600)
+        .child(div().flex_none().text_color(t[st.color] ?? t.dim).child(svg(ICON(st.icon)).size(11))).child(`v${base}`))
+      .child(this.button("base-newer", null, (_e, cx) => this.stepDiffBase(1, cx), c, { icon: "chevron-right", px: 4, h: 22, disabled: newer === base, tip: "Compare with a newer version" }))
+      .when(!df, (x) => x.child(div().text_color(t.dim).child("Loading changes…")))
+      .when(!!dp, (x) => x.child(stat(dp.stats.added, "+", t.ansi2)).child(stat(dp.stats.removed, "−", t.ansi1)))
+      .when(!!pageChip, (x) => x.child(this.chip(pageChip[0], pageChip[1], c)))
+      .child(div().flex_1())
+      .when(!!df, (x) => x.child(div().flex_none().text_color(t.dim).child(`${df.index.changed} of ${df.plan.pages.length} page${df.plan.pages.length === 1 ? "" : "s"} changed`)))
+      .when(folds, (x) => x.child(this.button("all-lines", this.allExpanded ? "Fold unchanged" : "Show all lines", () => { this.allExpanded = !this.allExpanded; }, c, { icon: "unfold", h: 24, px: 8, tip: "Fold or show the unchanged lines" })));
+  }
+
   // Whose plan this is and its state: "Claude Code · Waiting for review".
   agentChip(c, compact = false) {
     const { t } = c;
     const d = this.doc;
     if (!d) return null;
-    const st = STATES[d.review?.status ?? d.pointer.status] ?? STATES.pending;
+    const tg = this.target();
+    const old = !!tg && tg.pointer.version !== tg.newest;
+    const st = (d.review ? STATES[d.review.status] : old ? { label: "No review", color: "dim" } : STATES[d.pointer.status]) ?? STATES.pending;
     const color = t[st.color] ?? t.accent;
     return h_flex().flex_none().gap(6).items_center().px(8).h(24).rounded(12).bg(color + "1f").text_size(11.5)
       .child(div().size(7).rounded(4).bg(color))
@@ -1321,16 +1664,20 @@ export default class PlanReview extends View {
     const review = d.review;
     const dv = delivery(review, d.pointer.version);
     const state = decisionState(review);
+    const tg = this.target();
+    const older = !!tg && tg.pointer.version !== tg.newest;
     const tone = { done: t.done ?? t.ansi2, blocked: t.blocked, pending: t.ansi3, dim: t.dim }[state.tone];
     const bar = h_flex().id("decision").when(this.windowed, (x) => x.on_mouse_down("left", (_e, cx) => cx.stop_propagation())).w_full().h(56).flex_none().px(20).gap(10).items_center().border_t(1).border_color(t.border).bg(t.chrome)
       .child(h_flex().gap(8).items_center().flex_1().min_w(0).overflow_hidden().text_size(12.5).text_color(t.muted)
         .child(div().size(8).flex_none().rounded(4).bg(dv.onVersion ? (open ? t.ansi3 : t.done ?? t.ansi2) : tone))
-        .when(!dv.onVersion, (x) => x.child(div().flex_none().font_weight(600).text_color(tone).child(state.label)))
+        .when(!dv.onVersion, (x) => x.child(div().flex_none().font_weight(600).text_color(tone).child(older && !review ? "No review" : state.label)))
         .when(dv.onVersion, (x) => x.child(div().flex_none().child(`${open} open thread${open === 1 ? "" : "s"}`)))
         .when(resolved > 0, (x) => x.child(div().flex_none().text_color(t.dim).child(`· ${resolved} resolved`)))
         .child(div().min_w(0).truncate().text_color(t.dim).child(dv.onVersion
           ? open ? "· open threads go to the agent with your decision" : "· no open threads"
+          : older ? `· an earlier version, v${tg.newest} is the latest`
           : review?.status === "rejected" ? "· the agent is revising the plan" : review?.status === "approved" ? "· the agent is building" : "")))
+      .when(older, (x) => x.child(this.button("to-latest", `Go to v${tg.newest}`, (_e, cx) => this.pickVersion(tg.newest, cx), c, { outline: true, h: 32, px: 14, size: 13 })))
       .when(this.server.down, (x) => x.child(this.chip("Server not running", t.blocked, c)))
       .when(dv.onVersion, (x) => x
         .child(this.button("request-changes", "Request changes…", () => this.openDecision("reject"), c, { outline: true, h: 32, px: 14, size: 13, disabled: !!this.busy }))
@@ -1356,8 +1703,9 @@ export default class PlanReview extends View {
     // No release point (pre-selected): float just below the selection's last block.
     let y = this.pill.y;
     if (y == null) {
-      const k = this.page().words[range(this.sel)[1]].block;
-      y = 36 + this.blockTop(k) + (this.blockH.get(`${this.slug}:${k}`) ?? 40) - 26;
+      const page = this.page();
+      const w = page.words[range(this.sel)[1]];
+      y = page.diff ? 36 + this.diffRowTop(page.dp, w.row) + this.diffH(page.dp, w.row) - 26 : 36 + this.blockTop(w.block) + (this.blockH.get(`${this.slug}:${w.block}`) ?? 40) - 26;
     }
     return h_flex().id("pill").absolute().left(x).top(y + 16).gap(2).p(3).rounded(9).bg(t.popover ?? t.surface).border_1().border_color(t.border).shadow_lg()
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
@@ -1437,12 +1785,17 @@ export default class PlanReview extends View {
       this.wakeHost();
     }
     if (target && (!d || (!d.plan && !d.loading && !d.error && !this.server.down))) { this.wantDoc = target; this.wakeHost(); }
+    const wantBase = this.diffOn && d?.plan ? this.diffBaseOf(d) : null;
+    if (wantBase != null && !d.diffs.has(wantBase)) { this.wantDiff = { d, base: wantBase }; this.wakeHost(); }
     if (!target) return root.child(this.noPlan(c));
     if (!d?.plan && this.server.down) return root.child(this.serverDown(c));
     if (d?.error) return root.child(this.screen(c, "file", "This plan did not load", d.error, [this.button("retry", "Try again", (_e, cx) => { this.docs.delete(d.key); this.wakeHost(); this.touch(cx); }, c, { outline: true, h: 30, px: 12, size: 13 })]));
     if (!this.plan || !this.slug) return root.child(div().p(24).text_color(t.dim).child("Loading plan…"));
 
+    // The page may not exist in the diff (or version) now shown: fall back to the root.
+    this.slug = pageOr(this.plan, this.slug);
     const page = this.page();
+    if (page.diff) this.diffDisplay(page.dp);
     const mainW = this.width - (this.sidebarOn() ? SIDEBAR_W : 0);
     const marginMode = mainW - 2 * PAD - MARGIN_W - GAP >= TEXT_MIN;
     const textW = Math.max(300, Math.min(TEXT_MAX, mainW - 2 * PAD - (marginMode ? MARGIN_W + GAP : 0)));
@@ -1454,36 +1807,48 @@ export default class PlanReview extends View {
     const after = new Map();
     if (!marginMode) {
       const put = (k, el) => { if (!after.has(k)) after.set(k, []); after.get(k).push(el); };
+      // Cards go after the block (a diff: the display row) their anchor ends in.
+      const where = (i) => (page.diff ? page.dp.rowDisp[page.words[i].row] : page.words[i].block);
       for (const th of this.visibleThreads()) {
-        const k = th.kind === "page" || !th.words || th.detached ? 0 : page.words[th.words[1]].block;
+        const removed = this.removedRow(th);
+        const k = th.kind === "page" ? 0 : th.words && !th.detached ? where(th.words[1]) : removed != null ? page.dp.rowDisp[removed] : 0;
         put(k, this.card(th, c));
       }
-      if (this.composer && this.composer.doc === this.doc) put(this.composer.r ? page.words[this.composer.r[1]].block : 0, this.composerCard(c));
+      if (this.composer && this.composer.doc === this.doc) put(this.composer.r ? where(this.composer.r[1]) : 0, this.composerCard(c));
     }
 
-    // The blocks whose unit views exist (all but the tail of a page still being made).
+    // The blocks (a diff: the rows) whose unit views exist (all but the tail of a page still being made).
     const blocks = [];
     const ready = this.ui?.key === this.pageKey();
     if (!ready) this.wakeHost();
-    const V = this.viewH ?? 800, top = this.winTop.get(this.slug) ?? 0;
-    // Long pages mount only the units near the viewport (VIRTUAL_WORDS); `plan-review.virtual` toggles it.
-    const windowed = this.virtual !== false && page.words.length > VIRTUAL_WORDS;
-    const win = windowed ? { lo: top - 1.5 * V - 36, hi: top + 2.5 * V, y: 0 } : { lo: -Infinity, hi: Infinity, y: 0 };
-    for (let k = 0; ready && k < page.blocks.length; k++) {
-      const b = page.blocks[k];
-      const body = this.blockView(b, k, c, win);
-      win.y += this.spacing(b, page.blocks[k + 1]);
-      if (!body) break;
-      const key = `${this.slug}:${k}`;
-      blocks.push(v_flex().id(`blk-${key}`).w_full().pb(this.spacing(b, page.blocks[k + 1]))
-        .on_size_change((s, cx) => this.measure(this.blockH, key, s.height, cx))
-        .child(body)
-        .when(after.has(k), (x) => x.child(v_flex().w_full().pt(14).gap(10).children(after.get(k)))));
+    const V = this.viewH ?? 800, top = this.winTop.get(this.viewKey()) ?? 0;
+    let complete = false;
+    if (page.diff) {
+      // A long diff mounts only the rows near the viewport.
+      const windowed = this.virtual !== false && page.dp.rows.length > 300;
+      const win = windowed ? { lo: top - 1.5 * V - 36, hi: top + 2.5 * V } : { lo: -Infinity, hi: Infinity };
+      complete = ready && this.diffBlocks(page.dp, c, win, after, blocks);
+    } else {
+      // Long pages mount only the units near the viewport (VIRTUAL_WORDS); `plan-review.virtual` toggles it.
+      const windowed = this.virtual !== false && page.words.length > VIRTUAL_WORDS;
+      const win = windowed ? { lo: top - 1.5 * V - 36, hi: top + 2.5 * V, y: 0 } : { lo: -Infinity, hi: Infinity, y: 0 };
+      for (let k = 0; ready && k < page.blocks.length; k++) {
+        const b = page.blocks[k];
+        const body = this.blockView(b, k, c, win);
+        win.y += this.spacing(b, page.blocks[k + 1]);
+        if (!body) break;
+        const key = `${this.slug}:${k}`;
+        blocks.push(v_flex().id(`blk-${key}`).w_full().pb(this.spacing(b, page.blocks[k + 1]))
+          .on_size_change((s, cx) => this.measure(this.blockH, key, s.height, cx))
+          .child(body)
+          .when(after.has(k), (x) => x.child(v_flex().w_full().pt(14).gap(10).children(after.get(k)))));
+      }
+      complete = ready && blocks.length >= page.blocks.length;
     }
-    if (blocks.length < page.blocks.length) blocks.push(div().py(8).text_size(13).text_color(t.dim).child(ready ? "Drawing the rest of the page…" : "Loading page…"));
-    if (!page.blocks.length) blocks.push(div().py(8).text_size(13).text_color(t.dim).child("This page is empty."));
+    if (!complete) blocks.push(div().py(8).text_size(13).text_color(t.dim).child(ready ? "Drawing the rest of the page…" : "Loading page…"));
+    if (complete && !(page.diff ? page.dp.rows.length : page.blocks.length)) blocks.push(div().py(8).text_size(13).text_color(t.dim).child("This page is empty."));
 
-    const content = div().id(`content-${this.slug}`).relative().w(contentW).flex_none().px(PAD).pt(36).pb(120)
+    const content = div().id(`content-${this.viewKey()}`).relative().w(contentW).flex_none().px(PAD).pt(36).pb(120)
       .on_mouse_down("left", (_e, cx) => {
         // A press on empty space (not a word, card or button): clear the selection.
         if (this.wordPressed) { this.wordPressed = false; return; }
@@ -1498,7 +1863,8 @@ export default class PlanReview extends View {
 
     const main = v_flex().flex_1().min_w(0).h_full()
       .child(this.topbar(c))
-      .child(div().id(`scroll-${this.slug}`).flex_1().min_h(0).overflow_y_scrollbar()
+      .when(this.diffOn && this.diffBaseOf() != null, (x) => x.child(this.diffbar(c)))
+      .child(div().id(`scroll-${this.viewKey()}`).flex_1().min_h(0).overflow_y_scrollbar()
         .when(this.windowed, (x) => x.on_mouse_down("left", (_e, cx) => cx.stop_propagation()))
         .on_size_change((sz, _cx) => { this.viewH = sz.height; })
         .on_scroll_wheel((e, cx) => this.scrolled(originY(e), -(e.delta?.y ?? 0), cx))

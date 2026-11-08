@@ -202,6 +202,16 @@ Agent replies show up in their thread as the pointer file changes; while a pendi
 on screen it also refreshes like the web page (2.5 s, then 5, 15, 30 s; paused while hidden).
 "Open in browser" opens the same review in the web UI.
 
+Versions work as in the web UI: a **version switcher** in the header (v1 … vN, each with an icon
+for its state: waiting, changes requested, approved; the newest is shown by default and the page
+stays when you switch), and a **Diff** toggle (`D`) that shows the current page against the
+previous version (or a chosen older one) as unified rows with added/removed lines tinted and long
+unchanged runs folded behind an "expand" row. Words in added and unchanged rows select and
+comment like in the plan (new side only; removed lines are not commentable). Pages that exist in
+only one version get a marker in the tree. Open threads carried to a newer version show at their
+new place, and the threads of an older version show when you switch to it. Commands:
+`plan-review.diff`, `plan-review.prev-version`, `plan-review.next-version`.
+
 - **Install:** `agent-plan-review herdr install` **copies** the mod to
   `<HERDR_APP_HOME>/mods/plan-review`. It is a copy, not a symlink, because Herdr does not
   load files through a symlinked mod folder: every icon disappears ("a path led outside of the filesystem"). Run it again after

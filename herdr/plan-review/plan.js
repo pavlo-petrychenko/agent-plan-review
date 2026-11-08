@@ -67,6 +67,21 @@ export function planFromDocs(docs, root) {
   return buildTree(list);
 }
 
+/**
+ * The plan of a diff: its pages plus those only the base version has (`removed`: [{ slug, title,
+ * parent }]), which are empty pages marked `removed`. The plan itself is not changed.
+ */
+export function planWithRemoved(plan, removed) {
+  if (!removed.length) return plan;
+  const have = new Set(plan.pages.map((p) => p.slug));
+  const pages = plan.pages.map((p) => ({ ...p }));
+  for (const r of removed) {
+    if (have.has(r.slug)) continue;
+    pages.push({ slug: r.slug, title: r.title || null, parent: r.parent ?? plan.root, lines: [], startLine: 1, removed: true });
+  }
+  return buildTree(pages);
+}
+
 // Pages (the first is the root) → the tree: titles, parents, depth, reading order.
 function buildTree(pages) {
   const bySlug = new Map();
@@ -100,6 +115,11 @@ function buildTree(pages) {
   };
   walk(rootSlug, 0);
   return { pages: order.map((s) => bySlug.get(s)), bySlug, children, root: rootSlug, title: bySlug.get(rootSlug).title };
+}
+
+/** `slug` when the plan has that page (switching versions keeps the page), else the root. */
+export function pageOr(plan, slug) {
+  return slug && plan.bySlug.has(slug) ? slug : plan.root;
 }
 
 /** The page before or after `slug` in tree order (wraps: no). */

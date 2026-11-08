@@ -116,6 +116,7 @@ export function threadsFromComments(comments, wordsOf) {
       words: anchor.words,
       detached: anchor.detached,
       side: c.side ?? "new",
+      baseVersion: c.baseVersion ?? null,
       createdAt: at(c.createdAt),
       messages: msgs,
     };

@@ -41,6 +41,12 @@ export function createApi(base, fetchFn = globalThis.fetch) {
     base: root,
     health: () => get("/api/health"),
     review: (id) => get(`/api/reviews/${enc(id)}`),
+    /** The project: { meta, versions: [{ n, createdAt, kind, docCount }] }. */
+    project: (key) => get(`/api/projects/${enc(key)}`),
+    /** Every review of the project (any status), as the web UI lists them. */
+    reviewsOf: (key) => get(`/api/reviews?project=${enc(key)}`).then((r) => (Array.isArray(r) ? r : [])),
+    /** The page-by-page diff of two versions (differ.ts's inputs): { docs: [{ slug, title, parent, status, from?, to? }] }. */
+    diff: (key, from, to) => get(`/api/projects/${enc(key)}/diff?from=${from}&to=${to}`),
     version: (key, n) => get(v(key, n)),
     doc: (key, n, slug) => get(`${v(key, n)}/docs/${enc(slug)}`),
     comments: (key, n) => get(`${v(key, n)}/comments`).then((r) => r?.comments ?? []),
