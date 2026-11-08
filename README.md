@@ -254,6 +254,45 @@ Root content…
   plan submitted from a subdirectory joins its repo/worktree project (worktrees stay
   separate; outside a repo the nearest registered ancestor wins).
 
+## Forgetting a worktree
+
+```
+agent-plan-review forget --worktree <path> [--dry-run] [--json]
+```
+
+Deletes everything stored for one git worktree, under the store lock:
+
+- its project: versions, comments and reviews (pending reviews are removed, not rejected);
+- plan images that no other project references (images are shared by content, so an image
+  a second project still uses stays);
+- Herdr pointer files (`<herdrHome>/data/plan-review/*.json`, `herdrHome` = `HERDR_APP_HOME`
+  or `~/.config/herdr-app`) whose `projectKey` is that project. Unreadable files are skipped.
+
+It prints what it deleted, or with `--dry-run` what it would delete; `--json` prints the same
+as one JSON object. A path with no plans prints `no plans for <path>` and exits 0, so it is
+safe to call from a worktree-remove job. Exit 2 means bad arguments, 1 an I/O failure.
+
+The project key is computed from the **literal absolute path** (trailing slashes ignored), so
+it works after the folder is deleted. Unlike submission, it does not fold a subdirectory onto
+its git root: a delete command must only hit the path it was given. If the folder still exists,
+its symlink-resolved path is tried as well, because the store keys git's resolved toplevel.
+
+### Startup safety net (Herdr)
+
+When the server starts and the Herdr integration is enabled, it forgets projects whose
+recorded folder **no longer exists** and whose path is **inside a Herdr worktree root**, and
+logs each one. This catches worktrees removed outside the `forget` hook. It follows the same
+switch as the rest of the integration (`agent-plan-review herdr enable`, or
+`AGENT_PLAN_REVIEW_HERDR=1`; `=0` forces it off); when the integration is off, nothing is
+ever removed automatically.
+
+Worktree roots are `~/.herdr/worktrees/` plus the literal start of each `path` template in
+`<herdrHome>/repo-worktree.json` (`repos.<main checkout>.path`, or `defaults.path`), with
+`{home}`, `{repo.main}`, `{repo.parent}` and `{repo.name}` filled in and everything from the
+first remaining placeholder cut off: `{repo.parent}/website-{name:slug}` for a repo at
+`~/code/website` gives the root `~/code/website-`. Main checkouts, projects anywhere else,
+and roots whose folder is itself missing (unmounted disk) are never touched.
+
 ## Configuration
 
 | Env var | Default | Purpose |
@@ -262,7 +301,7 @@ Root content…
 | `AGENT_PLAN_REVIEW_PORT` | `4620` | Server port |
 | `AGENT_PLAN_REVIEW_TIMEOUT` | `1800` | Hook blocking timeout (seconds) |
 | `AGENT_PLAN_REVIEW_HERDR` | unset | `0`/`1` overrides the Herdr integration switch |
-| `HERDR_APP_HOME` | `~/.config/herdr-app` | Where Herdr pointer files are written |
+| `HERDR_APP_HOME` | `~/.config/herdr-app` | Where Herdr pointer files are written; `repo-worktree.json` is read from here |
 
 Legacy `PLAN_REVIEW_*` spellings are still honored.
 

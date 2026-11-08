@@ -67,10 +67,15 @@ export function herdrHome(env: NodeJS.ProcessEnv = process.env): string {
   return env.HERDR_APP_HOME?.trim() || path.join(os.homedir(), '.config', 'herdr-app');
 }
 
+/** Folder that holds the pointer files. */
+export function herdrPointerDir(env: NodeJS.ProcessEnv = process.env): string {
+  return path.join(herdrHome(env), 'data', 'plan-review');
+}
+
 /** Pointer file for a terminal, or null when the id is not a safe file name. */
 export function herdrPointerFile(terminal: string, env: NodeJS.ProcessEnv = process.env): string | null {
   if (!TERMINAL_RE.test(terminal)) return null;
-  return path.join(herdrHome(env), 'data', 'plan-review', `${terminal}.json`);
+  return path.join(herdrPointerDir(env), `${terminal}.json`);
 }
 
 /**
@@ -147,7 +152,7 @@ export function runHerdrCommand(
   out(`Herdr integration: ${effective.enabled ? 'enabled' : 'disabled'}`);
   out(`  browser for Herdr terminals: ${effective.enabled && !effective.openBrowser ? 'skipped' : 'opened'}`);
   out(`  config: ${appConfigPath(home)}`);
-  out(`  pointer files: ${path.join(herdrHome(env), 'data', 'plan-review')}`);
+  out(`  pointer files: ${herdrPointerDir(env)}`);
   const override = env.AGENT_PLAN_REVIEW_HERDR?.trim();
   if (override === '0' || override === '1')
     out(`  (AGENT_PLAN_REVIEW_HERDR=${override} overrides the config file)`);

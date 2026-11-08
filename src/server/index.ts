@@ -7,6 +7,7 @@ import { createApiRouter } from './api/router.js';
 import { errorHandler } from './api/helpers.js';
 import { PlanReviewStore } from './store/store.js';
 import { ensureDir } from './util/fs.js';
+import { forgetMissingWorktrees } from './integrations/herdr-worktrees.js';
 
 /**
  * Server entrypoint. Binds 127.0.0.1 only (localhost tool), records its
@@ -39,6 +40,10 @@ export function serve(): void {
       fs.writeFileSync(serverJsonPath(cfg), JSON.stringify({ port: cfg.port, pid: process.pid }, null, 2));
     });
     console.log(`plan-review listening on http://localhost:${cfg.port}`);
+    // Only the instance that owns the port sweeps (a second one exits on EADDRINUSE).
+    void forgetMissingWorktrees(store).catch((err: unknown) => {
+      console.error('plan-review: worktree sweep failed:', err);
+    });
   });
 
   // A second instance detecting an occupied port exits 0 quietly.

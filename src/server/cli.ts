@@ -6,6 +6,7 @@
  *   agent-plan-review hook-exit-plan-mode  Claude Code ExitPlanMode PreToolUse hook
  *   agent-plan-review stop-gate          Claude Code Stop hook gate (one-reminder semantics)
  *   agent-plan-review enter-plan-mode    Claude Code EnterPlanMode context hook
+ *   agent-plan-review forget --worktree <path>  delete the plans of a removed worktree
  *   agent-plan-review install-skill      install the global agent skill
  *   agent-plan-review install-pi-extension  install the plan-review-wake pi extension
  *   agent-plan-review herdr enable|disable|status  optional Herdr integration
@@ -23,6 +24,7 @@ import { runEnterPlanModeHook } from './integrations/enter-plan-mode.js';
 import { PI_WAKE_EXTENSION_FILENAME, PI_WAKE_EXTENSION_SOURCE } from './integrations/pi-wake-source.js';
 import { runHerdrCommand } from './integrations/herdr.js';
 import { installSkill } from './skill.js';
+import { runForget } from './forget-cli.js';
 import { APP_NAME, loadConfig } from './config.js';
 
 const cfg = loadConfig();
@@ -46,6 +48,10 @@ Commands:
                            Herdr mod; --browser keeps opening the browser too)
   herdr disable            Turn the Herdr integration off (the default)
   herdr status             Show the effective Herdr settings
+  forget --worktree <path> [--dry-run] [--json]
+                           Delete a worktree's plans (versions, comments, reviews), images
+                           no other project uses, and Herdr pointer files. Works after the
+                           folder is gone; exits 0 when nothing matched.
 
 Integration — Claude Code (hooks, blocking):
   ~/.claude/settings.json → hooks:
@@ -111,6 +117,9 @@ switch (command) {
     process.exit(code);
     break;
   }
+  case 'forget':
+    void runForget(process.argv.slice(3), cfg).then((code) => process.exit(code));
+    break;
   default:
     process.stdout.write(HELP);
     process.exit(command ? 1 : 0);

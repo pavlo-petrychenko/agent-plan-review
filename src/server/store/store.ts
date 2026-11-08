@@ -30,6 +30,7 @@ import { renderMarkdown } from '../render/markdown.js';
 import { conflict, notFound, badRequest } from '../util/errors.js';
 import { withFileLock } from '../util/fs.js';
 import { syncHerdrPointers, type HerdrScope } from '../integrations/herdr.js';
+import { forgetProjectsUnlocked, type ForgetResult } from './forget.js';
 
 /**
  * Facade over the storage layer used by API routes and integrations.
@@ -589,6 +590,17 @@ export class PlanReviewStore {
       await this.syncHerdr({ reviewId: r.id });
     }
     await this.projects.remove(key);
+  }
+
+  /**
+   * Remove whole projects with everything that hangs off them: versions,
+   * comments, their reviews, and plan images no surviving project uses. Unlike
+   * `deleteProject` this neither refuses on pending reviews nor rejects them:
+   * the worktree they belong to is gone, so they are simply removed.
+   * With `dryRun` nothing is touched; the result says what would go.
+   */
+  forgetProjects(keys: string[], dryRun = false): Promise<ForgetResult> {
+    return this.coordinate(() => forgetProjectsUnlocked(this.layout, this.projects, this.reviews, keys, dryRun));
   }
 
   /**
