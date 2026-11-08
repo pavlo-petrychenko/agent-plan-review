@@ -11,7 +11,7 @@
 
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,6 +27,12 @@ interface Rpc {
   result?: unknown;
 }
 
+/** The port every test server is asked to use (never the user's own :4620). */
+const TEST_PORT = 46000 + (process.pid % 1000);
+
+/** Homes an MCP process was started in: their review server may still be booting. */
+const usedHomes = new Set<string>();
+
 class McpDriver {
   private proc;
   private buffer = '';
@@ -39,6 +45,7 @@ class McpDriver {
     readonly home: string,
     extraEnv: Record<string, string> = {},
   ) {
+    usedHomes.add(home);
     this.proc = spawn(
       process.execPath,
       ['--import', 'tsx', path.join(REPO_ROOT, 'src', 'server', 'cli.ts'), 'mcp'],
@@ -48,7 +55,7 @@ class McpDriver {
           ...process.env,
           AGENT_PLAN_REVIEW_HOME: home,
           // Never touch the network or a browser from tests.
-          AGENT_PLAN_REVIEW_PORT: String(46000 + (process.pid % 1000)),
+          AGENT_PLAN_REVIEW_PORT: String(TEST_PORT),
           AGENT_PLAN_REVIEW_NO_OPEN: '1',
           ...extraEnv,
         },
@@ -122,22 +129,74 @@ class McpDriver {
 /** Homes handed out by makeHome(), swept in after() in case a test forgot to close. */
 const homes: string[] = [];
 
-/**
- * The MCP server starts the review server detached (it outlives the MCP
- * process by design), so a test must stop it itself: SIGTERM the pid it
- * recorded in <home>/server.json.
- */
-function stopServer(home: string): void {
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+function serverPid(home: string): number | null {
   try {
     const { pid } = JSON.parse(fs.readFileSync(path.join(home, 'server.json'), 'utf8')) as { pid?: number };
-    if (typeof pid === 'number' && pid > 1) process.kill(pid, 'SIGTERM');
+    return typeof pid === 'number' && pid > 1 ? pid : null;
   } catch {
-    // no server was started, or it is already gone
+    return null;
   }
 }
 
-after(() => {
-  for (const h of homes) stopServer(h);
+/**
+ * The MCP server starts the review server detached (it outlives the MCP
+ * process by design), so a test must stop it itself: SIGTERM the pid it
+ * recorded in <home>/server.json. Best effort and synchronous; after() does the
+ * thorough sweep for a server that had not written server.json yet.
+ */
+function stopServer(home: string): void {
+  const pid = serverPid(home);
+  if (pid === null) return;
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch {
+    // already gone
+  }
+}
+
+/** Pids listening on the test port (always 46xxx, never the user's :4620). */
+function listenersOnTestPort(): number[] {
+  try {
+    const out = execFileSync('lsof', ['-ti', `tcp:${TEST_PORT}`, '-sTCP:LISTEN'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return out
+      .split(/\s+/)
+      .map(Number)
+      .filter((n) => Number.isInteger(n) && n > 1);
+  } catch {
+    return []; // lsof exits 1 when nothing listens
+  }
+}
+
+after(async () => {
+  // A server may still be booting when its test ended (npx -> tsx -> node takes a
+  // second), so server.json can appear after close(). Wait for each home's server
+  // to record itself, in parallel, then stop it.
+  const deadline = Date.now() + 6000;
+  await Promise.all(
+    homes.map(async (h) => {
+      while (usedHomes.has(h) && serverPid(h) === null && Date.now() < deadline) await sleep(150);
+      stopServer(h);
+    }),
+  );
+  // Last resort: whatever still listens on the test port (a server whose home
+  // was never recorded, or one spawned by a later call).
+  for (let round = 0; round < 20; round++) {
+    const pids = listenersOnTestPort();
+    if (pids.length === 0) break;
+    for (const pid of pids) {
+      try {
+        process.kill(pid, round < 10 ? 'SIGTERM' : 'SIGKILL');
+      } catch {
+        // gone
+      }
+    }
+    await sleep(250);
+  }
 });
 
 async function makeHome(): Promise<string> {
