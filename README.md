@@ -160,6 +160,40 @@ plan mode"), allow it — it is the only write the review needs there:
 { "permissions": { "allow": ["mcp__agent-plan-review__plan_review_reply"] } }
 ```
 
+## Herdr integration (optional)
+
+Herdr runs agents in its own terminals and sets `HC_TERMINAL_ID`
+in each one. This integration is **off by default**: the browser stays the review
+surface, and nothing below happens until you enable it.
+
+```bash
+agent-plan-review herdr enable            # Herdr mod shows plans; no browser tab for Herdr terminals
+agent-plan-review herdr enable --browser  # pointer files AND the browser tab
+agent-plan-review herdr disable           # back to the default
+agent-plan-review herdr status
+```
+
+The setting lives in `<storage root>/config.json`
+(`{ "integrations": { "herdr": { "enabled": true, "openBrowser": false } } }`);
+`AGENT_PLAN_REVIEW_HERDR=0|1` overrides `enabled` for one process. A missing or broken
+file means "off".
+
+- **Always (harmless metadata):** a review submitted from a Herdr terminal records
+  `agent: { terminal, harness }` (`claude-code` for the hook, the MCP client name for
+  `plan_review_submit`). `GET /api/reviews?terminal=<id>` lists that terminal's reviews,
+  newest first.
+- **Only when enabled:** each submit, Ask, agent reply, thread resolve and decision
+  rewrites `<HERDR_APP_HOME or ~/.config/herdr-app>/data/plan-review/<terminal>.json`
+  atomically with `{ reviewId, projectKey, version, status, title, cwd, updatedAt }` for
+  the terminal's newest review. A failed write is logged and never fails the review.
+- **Only when enabled, for agents in a Herdr terminal:** the hook and MCP server skip the
+  browser tab unless `openBrowser` is true. The review server still starts as usual, and
+  agents outside Herdr are unaffected.
+
+Comments may also carry `range: { start, end }` — character offsets into the page's
+markdown — for word-exact anchors. It is optional; it is dropped when a carried thread's
+line anchor moves, and clients fall back to the quote.
+
 ## Multi-document plans
 
 A single markdown blob can carry multiple pages via markers (alone on their own line):
@@ -227,6 +261,8 @@ Root content…
 | `AGENT_PLAN_REVIEW_HOME` | `~/.agent-plan-review` | Storage root |
 | `AGENT_PLAN_REVIEW_PORT` | `4620` | Server port |
 | `AGENT_PLAN_REVIEW_TIMEOUT` | `1800` | Hook blocking timeout (seconds) |
+| `AGENT_PLAN_REVIEW_HERDR` | unset | `0`/`1` overrides the Herdr integration switch |
+| `HERDR_APP_HOME` | `~/.config/herdr-app` | Where Herdr pointer files are written |
 
 Legacy `PLAN_REVIEW_*` spellings are still honored.
 
