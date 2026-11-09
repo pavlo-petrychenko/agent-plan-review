@@ -13,6 +13,16 @@ export class ApiError extends Error {
 
 const enc = encodeURIComponent;
 
+/** What a failed load says on screen. Herdr's limit on background tasks (shared by every mod in
+ *  the window) breaks every load until the window restarts, so that one names the way out. */
+export function loadErrorText(err) {
+  const msg = String(err?.message ?? err ?? "Unknown error");
+  if (/outstanding host task limit/i.test(msg)) {
+    return "Herdr ran out of background tasks: a mod in this window leaks them. Restart Herdr (your agents keep running), then the plan loads.";
+  }
+  return msg;
+}
+
 /** A client for the server at `base` ("http://127.0.0.1:4620"). */
 export function createApi(base, fetchFn = globalThis.fetch) {
   const root = String(base).replace(/\/+$/, "");
