@@ -28,7 +28,7 @@ import { makeUnits, changedUnits, unitsByBlock } from "./units.js";
 import { POINTER_DIR, IMAGE_DIR, STACK, AGENT_VIEW, PLAN_VIEW, VIEW_KEY, STATES, parsePointer, terminalOfFile, touchesPointers, planFor, stackActive, harnessName, NOTIFIED_KEY, noticeKey, planNotice } from "./pointer.js";
 import { parseInstall, serverUrl, reviewPageUrl, startScript, pollDelay } from "./server.js";
 import { createApi, loadErrorText } from "./api.js";
-import { delivery, withDelivery, sentLabel, decisionState } from "./review.js";
+import { delivery, withDelivery, decisionState } from "./review.js";
 import { buildDiffPage, collapseRows, removedRowOf } from "./diff.js";
 import { VERSION_STATES, PAGE_MARKS, versionList, shownVersion, pointerFor, diffBase, stepBase, neighbourVersion, diffIndex } from "./versions.js";
 
@@ -875,7 +875,8 @@ export default class PlanReview extends View {
     const anchor = c.r ? anchorOf(this.page().words, c.r) : { line: null, lineEnd: null, quote: null };
     const input = withDelivery({ doc: this.slug, ...anchor, body }, d.review, d.pointer.version, kind);
     cx.spawn(async (cx) => {
-      const made = await this.send("comment", cx, (api) => api.addComment(d.pointer.projectKey, d.pointer.version, input), () => sentLabel(input, d.review, d.pointer.version));
+      // No toast: the new thread on the page is the confirmation (errors still toast).
+      const made = await this.send("comment", cx, (api) => api.addComment(d.pointer.projectKey, d.pointer.version, input));
       if (!made) return;
       if (this.composer === c) this.closeComposer();
       this.setSel(null, cx);
@@ -907,7 +908,7 @@ export default class PlanReview extends View {
     const d = this.doc;
     const input = withDelivery({ body }, d.review, d.pointer.version, kind);
     cx.spawn(async (cx) => {
-      const made = await this.send("reply", cx, (api) => api.reply(d.pointer.projectKey, d.pointer.version, r.id, input), () => sentLabel(input, d.review, d.pointer.version));
+      const made = await this.send("reply", cx, (api) => api.reply(d.pointer.projectKey, d.pointer.version, r.id, input));
       if (made && this.replying === r) this.closeReply();
       this.touch(cx);
     });
