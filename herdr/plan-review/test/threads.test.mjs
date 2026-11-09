@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parsePage, wordText } from "../markdown.js";
 import { tintMap, threadAt } from "../selection.js";
-import { anchorOf, anchorWords, findQuote, threadsFromComments, openCounts, layoutMargin, ago } from "../threads.js";
+import { anchorOf, anchorWords, findQuote, threadsFromComments, openCounts, layoutMargin, ago, messageMarkdown } from "../threads.js";
 
 const LINES = ["# Rate limits", "", "Use a **token bucket** per key.", "Buckets refill every second.", "", "- one key per user", "- token bucket again"];
 const page = () => parsePage(LINES, 1);
@@ -97,4 +97,20 @@ test("time labels", () => {
   assert.equal(ago(0, 10_000), "just now");
   assert.equal(ago(0, 5 * 60_000), "5 min ago");
   assert.equal(ago(0, 3 * 3600_000), "3 h ago");
+});
+
+test("messageMarkdown links bare URLs and keeps line breaks", () => {
+  const url = "https://example.slack.com/archives/C0776J8NJ7N/p1794228055385199";
+  assert.equal(messageMarkdown(`read this thread ${url}\n\nwe will replace the model`), `read this thread <${url}>\n\nwe will replace the model`);
+  assert.equal(messageMarkdown("one\ntwo"), "one  \ntwo");
+  assert.equal(messageMarkdown("see https://a.io/x."), "see <https://a.io/x>.");
+  assert.equal(messageMarkdown("(see https://a.io/x)"), "(see <https://a.io/x>)");
+  assert.equal(messageMarkdown("https://en.wikipedia.org/wiki/A_(b)"), "<https://en.wikipedia.org/wiki/A_(b)>");
+});
+
+test("messageMarkdown leaves links, autolinks and code alone", () => {
+  for (const s of ["[docs](https://a.io)", "[https://a.io](https://a.io)", "<https://a.io>", "run `curl https://a.io` now"]) assert.equal(messageMarkdown(s), s);
+  const fenced = "```\ncurl https://a.io\nline two\n```";
+  assert.equal(messageMarkdown(fenced), fenced);
+  assert.equal(messageMarkdown(null), "");
 });

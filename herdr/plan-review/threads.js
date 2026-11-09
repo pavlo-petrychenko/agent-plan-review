@@ -165,3 +165,37 @@ export function ago(at, now = Date.now()) {
   if (s < 86400) return `${Math.round(s / 3600)} h ago`;
   return `${Math.round(s / 86400)} d ago`;
 }
+
+// A bare URL, and the punctuation that ends a sentence after it rather than belonging to it.
+const URL_RE = /https?:\/\/[^\s<>`]+/g;
+const TRAIL_RE = /[.,;:!?'"*_]+$/;
+
+/** Wraps bare URLs in `<…>` (a CommonMark autolink) outside code spans and existing links. */
+function linkUrls(text) {
+  return text.split(/(`+[^`]*`+)/).map((part, i) => i % 2 ? part : part.replace(URL_RE, (url, at, s) => {
+    const before = s.slice(Math.max(0, at - 2), at);
+    if (before.endsWith("<") || before.endsWith("[") || before === "](") return url;
+    let u = url.replace(TRAIL_RE, "");
+    // A closing parenthesis belongs to the URL only when the URL opened one.
+    while (u.endsWith(")") && (u.match(/\(/g) ?? []).length < (u.match(/\)/g) ?? []).length) u = u.slice(0, -1).replace(TRAIL_RE, "");
+    return `<${u}>${url.slice(u.length)}`;
+  })).join("");
+}
+
+/**
+ * A comment or reply body as the markdown the card draws. People type plain text and agents
+ * write markdown, so: bare URLs become links, and a single line break stays a line break
+ * (plain markdown would join the lines). Fenced code blocks are left as they are.
+ */
+export function messageMarkdown(body) {
+  const lines = String(body ?? "").replace(/\r\n?/g, "\n").split("\n");
+  let fence = null;
+  return lines.map((line, i) => {
+    const f = line.match(/^\s*(`{3,}|~{3,})/);
+    if (f && (!fence || f[1][0] === fence[0] && f[1].length >= fence.length)) { fence = fence ? null : f[1]; return line; }
+    if (fence) return line;
+    const out = linkUrls(line);
+    const next = lines[i + 1];
+    return out.trim() && next !== undefined && next.trim() && !/^\s*(`{3,}|~{3,})/.test(next) ? `${out.replace(/\s+$/, "")}  ` : out;
+  }).join("\n");
+}
