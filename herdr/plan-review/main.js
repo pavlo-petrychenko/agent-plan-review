@@ -19,13 +19,13 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea, Popover } from "gpui-base";
-import { props, theme, settings, appHome, readTextFile, exec, notify, watchFolder, nextCommand, run, setShared, openOverlay, closeOverlay, focused, panes, shared, layout } from "herdr";
+import { props, theme, settings, appHome, readTextFile, exec, notify, watchFolder, nextCommand, run, setShared, openOverlay, closeOverlay, focused, panes, agents, shared, layout } from "herdr";
 import { planFromDocs, planWithRemoved, pageOr, neighbour, ancestors, treeRows } from "./plan.js";
 import { parsePage, wordText } from "./markdown.js";
 import { range, inRange, extend, flowRange, rangeText, tintMap, threadAt } from "./selection.js";
 import { threadsFromComments, anchorOf, openCounts, layoutMargin, ago } from "./threads.js";
 import { makeUnits, changedUnits, unitsByBlock } from "./units.js";
-import { POINTER_DIR, IMAGE_DIR, STACK, AGENT_VIEW, PLAN_VIEW, VIEW_KEY, STATES, parsePointer, terminalOfFile, touchesPointers, planFor, stackActive, harnessName } from "./pointer.js";
+import { POINTER_DIR, IMAGE_DIR, STACK, AGENT_VIEW, PLAN_VIEW, VIEW_KEY, STATES, parsePointer, terminalOfFile, touchesPointers, planFor, stackActive, harnessName, NOTIFIED_KEY, noticeKey, planNotice } from "./pointer.js";
 import { parseInstall, serverUrl, reviewPageUrl, startScript, pollDelay } from "./server.js";
 import { createApi, loadErrorText } from "./api.js";
 import { delivery, withDelivery, sentLabel, decisionState } from "./review.js";
@@ -174,7 +174,9 @@ export default class PlanReview extends View {
       const dir = `${this.home}/${POINTER_DIR}`;
       await exec("mkdir", ["-p", dir]).catch(() => null);
       this.install = parseInstall(await readTextFile(`${this.home}/${MOD}/install.json`).catch(() => null));
+      this.seeding = shared(NOTIFIED_KEY) == null;
       await this.readPointers(null, cx);
+      this.seeding = false;
       for (;;) {
         const changed = await watchFolder(dir).catch(() => null);
         if (!changed) { await sleep(cx, 5000); await this.readPointers(null, cx); continue; }
@@ -250,11 +252,37 @@ export default class PlanReview extends View {
       const ptr = raw == null ? null : parsePointer(raw);
       this.pointerRaw.set(terminal, raw);
       if (ptr) this.pointers.set(terminal, ptr); else this.pointers.delete(terminal);
+      this.announce(terminal, ptr);
       // The pointer moves on every agent reply, resolve and decision: refresh what is loaded.
       const d = ptr && this.docs.get(this.docKey(ptr));
       if (d && d.plan && d.pointer?.updatedAt !== ptr.updatedAt) { d.pointer = ptr; await this.refreshDoc(d, cx); }
     }
     if (any) this.touch(cx);
+  }
+
+  /**
+   * A toast when an agent submits a plan (or a new version); clicking it goes to that agent. Every
+   * copy of this mod reads the pointers, so the shared map decides which one announces: the check
+   * and the write happen with no await between them. On the very first run (no map yet) the first
+   * read only records what is there.
+   */
+  announce(terminal, ptr) {
+    const was = shared(NOTIFIED_KEY);
+    const map = was && typeof was === "object" ? was : null;
+    if (!planNotice(ptr, map?.[terminal])) return;
+    setShared(NOTIFIED_KEY, { ...(map ?? {}), [terminal]: noticeKey(ptr) });
+    if (this.seeding) return; // the first read on a first run: these plans were already there
+    if (focused()?.terminal === terminal) return; // looking at that agent already
+    const pane = panes().find((p) => p.terminal === terminal)?.pane;
+    const agent = pane ? agents().find((a) => a.pane === pane) : null;
+    const where = agent ? `${agent.space_name} · ` : "";
+    notify({
+      title: `Plan to review: ${ptr.title}`,
+      body: `${where}v${ptr.version} · click to go to the agent`,
+      level: "info",
+      timeout: 10000,
+      action: { name: "agent.focus", args: { terminal } },
+    });
   }
 
   docKey(ptr) { return `${ptr.projectKey}@${ptr.version}`; }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parsePointer, terminalOfFile, touchesPointers, planFor, sameDoc, stackActive, harnessName } from "../pointer.js";
+import { parsePointer, terminalOfFile, touchesPointers, planFor, sameDoc, stackActive, harnessName, noticeKey, planNotice } from "../pointer.js";
 import { parseInstall, serverUrl, reviewPageUrl, startScript, pollDelay } from "../server.js";
 
 const P = { reviewId: "r1", projectKey: "repo-abc", version: 2, status: "pending", title: "Plan", cwd: "/w/repo", updatedAt: "2026-01-01T00:00:00Z" };
@@ -72,4 +72,14 @@ test("server: the start script runs serve detached with the store, port and Herd
 test("pollDelay: 2.5 s, then 5 s after 30 s, 15 s after 2 min, 30 s after 10 min", () => {
   assert.deepEqual([0, 29_999, 30_000, 119_999, 120_000, 599_999, 600_000, 3_600_000].map(pollDelay),
     [2_500, 2_500, 5_000, 5_000, 15_000, 15_000, 30_000, 30_000]);
+});
+
+test("planNotice announces a pending plan once per version", () => {
+  const p = { reviewId: "r1", version: 2, status: "pending" };
+  assert.equal(noticeKey(p), "r1@2");
+  assert.equal(planNotice(p, undefined), true);
+  assert.equal(planNotice(p, "r1@1"), true);
+  assert.equal(planNotice(p, "r1@2"), false);
+  assert.equal(planNotice({ ...p, status: "approved" }, undefined), false);
+  assert.equal(planNotice(null, undefined), false);
 });
