@@ -78,3 +78,20 @@ export function threadAt(threads, page, i) {
   }
   return best;
 }
+
+/** The link a word belongs to ("slug:x" / "url:y"), or null. */
+export function linkKeyOf(word) {
+  const l = word?.segs?.find((s) => s.link)?.link;
+  return l ? (l.slug ? `slug:${l.slug}` : l.url ? `url:${l.url}` : null) : null;
+}
+
+/** The words of the link around word i, as [from, to], or null when word i is not in a link. One
+ *  link's words are neighbours with the same target (a link's label may span several words). */
+export function linkRange(words, i) {
+  const key = linkKeyOf(words[i]);
+  if (!key) return null;
+  let a = i, b = i;
+  while (a > 0 && words[a - 1].flow === words[i].flow && linkKeyOf(words[a - 1]) === key) a--;
+  while (b < words.length - 1 && words[b + 1].flow === words[i].flow && linkKeyOf(words[b + 1]) === key) b++;
+  return [a, b];
+}

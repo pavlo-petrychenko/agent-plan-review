@@ -38,3 +38,14 @@ test("changedUnits: only the units whose tint changed, plus the word before a ch
   assert.deepEqual([...changedUnits([0, 8], [0, 3], wu)].sort(), [1, 2]);
 });
 
+
+test("table columns: at least as wide as their longest word; a table wider than the text scrolls", async () => {
+  const { tableColumns, tableWidth } = await import("../markdown.js");
+  const cell = (...words) => ({ words: words.map((t) => ({ segs: [{ text: t }] })) });
+  const code = (t) => ({ words: [{ segs: [{ text: t, code: true }] }] });
+  const b = { header: [cell("Feature"), cell("Operation"), cell("Why")], rows: [[cell("Call", "type"), cell("ClassifyConversation"), code("conventions.md:61")]] };
+  const cols = tableColumns(b);
+  assert.ok(cols[1].min >= 20 * 8.2 + 24, "ClassifyConversation fits its cell");
+  assert.ok(cols[2].min >= 17 * 8.6 + 10 + 24, "a code chip fits its cell");
+  assert.equal(tableWidth(cols), cols.reduce((n, c) => n + c.min, 0) + 2);
+});

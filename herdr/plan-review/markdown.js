@@ -378,3 +378,33 @@ function parseBlocks(lines, startLine, ctx, top) {
 
 /** A word's visible text (segments joined, no trailing space). */
 export const wordText = (w) => w.segs.map((s) => s.text).join("");
+
+// Rough pixel widths at the table's 14 px text: proportional text, and code (monospace, in a chip).
+const TEXT_PX = 8.2, CODE_PX = 8.6, CHIP_PX = 10, CELL_PAD_PX = 24;
+
+/** The drawn width of one word, roughly: its text runs plus code chip padding. */
+export function wordPx(w) {
+  let px = 0;
+  for (const s of w.segs) px += s.text.length * (s.code ? CODE_PX : TEXT_PX) + (s.code && !w.code ? CHIP_PX : 0);
+  return px;
+}
+
+/**
+ * A table's columns: { grow, min } each. `grow` shares the free width by how much text a column holds
+ * (square root, 1–6). `min` is the column's longest word plus the cell padding, so a long word
+ * (`ClassifyConversation`, a code path) is not narrower than its cell and does not run into the next
+ * one. When the minimums do not fit, the table is wider than the text and scrolls sideways
+ * (tableWidth).
+ */
+export function tableColumns(b) {
+  const cells = (k) => [b.header[k], ...b.rows.map((r) => r[k])].filter(Boolean);
+  const cols = b.header.map((_, k) => {
+    const len = Math.max(0, ...cells(k).map((f) => f.words.reduce((n, w) => n + wordText(w).length + 1, 0)));
+    const longest = Math.max(0, ...cells(k).flatMap((f) => f.words.map(wordPx)));
+    return { grow: Math.max(1, Math.min(6, Math.sqrt(len))), min: Math.ceil(longest + CELL_PAD_PX + 1) };
+  });
+  return cols;
+}
+
+/** The width a table needs: its columns' minimums and the frame's border. */
+export const tableWidth = (cols) => cols.reduce((n, c) => n + c.min, 0) + 2;
