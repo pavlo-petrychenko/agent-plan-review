@@ -13,6 +13,16 @@ export const AGENT_VIEW = "main";
 export const PLAN_VIEW = "plan";
 export const VIEW_KEY = "plan-review.view"; // shared: the side last flipped to (set by the flip)
 
+export const NOTIFIED_KEY = "plan-review.notified"; // shared: terminal → the last plan announced ("reviewId@version")
+
+/** The identity of a submitted plan version, for announcing it once. */
+export const noticeKey = (ptr) => `${ptr.reviewId}@${ptr.version}`;
+
+/** Whether a pointer is a plan to announce: waiting for review, and not announced for its terminal yet. */
+export function planNotice(ptr, announced) {
+  return !!ptr && ptr.status === "pending" && announced !== noticeKey(ptr);
+}
+
 export const STATES = {
   pending: { label: "Waiting for review", color: "ansi3" },
   approved: { label: "Approved", color: "ansi2" },
