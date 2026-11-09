@@ -27,7 +27,7 @@ import { threadsFromComments, anchorOf, openCounts, layoutMargin, ago } from "./
 import { makeUnits, changedUnits, unitsByBlock } from "./units.js";
 import { POINTER_DIR, IMAGE_DIR, STACK, AGENT_VIEW, PLAN_VIEW, VIEW_KEY, STATES, parsePointer, terminalOfFile, touchesPointers, planFor, stackActive, harnessName } from "./pointer.js";
 import { parseInstall, serverUrl, reviewPageUrl, startScript, pollDelay } from "./server.js";
-import { createApi } from "./api.js";
+import { createApi, loadErrorText } from "./api.js";
 import { delivery, withDelivery, sentLabel, decisionState } from "./review.js";
 import { buildDiffPage, collapseRows, removedRowOf } from "./diff.js";
 import { VERSION_STATES, PAGE_MARKS, versionList, shownVersion, pointerFor, diffBase, stepBase, neighbourVersion, diffIndex } from "./versions.js";
@@ -61,6 +61,7 @@ const VIRTUAL_WORDS = 3000;
 // pointer in the element.
 const originY = (e) => (e?.position && e.local_position ? e.position.y - e.local_position.y : e?.bounds?.y ?? null);
 const sleep = (cx, ms) => new Promise((ok) => cx.timer.after(ms, () => ok()));
+const newDoc = (key, pointer) => ({ key, pointer, pages: new Map(), images: new Map(), diffs: new Map(), slug: null, plan: null, threads: [], comments: [], ver: 0 });
 
 class UnitView extends View {
   init(p) { this.p = p; }
@@ -122,13 +123,24 @@ export default class PlanReview extends View {
       for (;;) {
         if (!this.wakePending) await new Promise((ok) => { this.waker = ok; });
         this.wakePending = false;
-        await sleep(cx, 0);
-        if (this.wantDoc) { const t = this.wantDoc; this.wantDoc = null; await this.ensureDoc(t, cx); }
-        if (this.wantDiff) { const w = this.wantDiff; this.wantDiff = null; await this.ensureDiff(w, cx); }
-        if (this.startProps && this.doc?.plan && this.page()) this.applyStartProps();
-        if (this.doc?.plan && this.slug && this.ui?.key !== this.pageKey()) this.prepareUnits(cx);
-        else if (this.ui && this.ui.next < this.ui.units.length) this.createUnits(cx, 1500);
-        this.touch(cx);
+        // One failed step must not end this loop: every later load waits on it, and the view would
+        // say "Loading plan…" for good. The wait above is a plain promise, so a failure that
+        // repeats does not spin.
+        const want = this.wantDoc;
+        this.wantDoc = null;
+        try {
+          await sleep(cx, 0);
+          if (want) await this.ensureDoc(want, cx);
+          if (this.wantDiff) { const w = this.wantDiff; this.wantDiff = null; await this.ensureDiff(w, cx); }
+          if (this.startProps && this.doc?.plan && this.page()) this.applyStartProps();
+          if (this.doc?.plan && this.slug && this.ui?.key !== this.pageKey()) this.prepareUnits(cx);
+          else if (this.ui && this.ui.next < this.ui.units.length) this.createUnits(cx, 1500);
+          this.touch(cx);
+        } catch (e) {
+          console.error("plan-review: the load step failed:", e?.message ?? e);
+          if (want) this.failDoc(want, e);
+          try { this.touch(cx); } catch {}
+        }
       }
     });
     // The keyboard: asked for when the plan is flipped to, or by `plan-review.focus`. The element is
@@ -406,12 +418,12 @@ export default class PlanReview extends View {
     const key = this.docKey(t.pointer);
     let d = this.docs.get(key);
     if (d && (d.plan || d.loading)) return d;
-    if (!d) { d = { key, pointer: t.pointer, pages: new Map(), images: new Map(), diffs: new Map(), slug: null, plan: null, threads: [], comments: [], ver: 0 }; this.docs.set(key, d); }
+    if (!d) { d = newDoc(key, t.pointer); this.docs.set(key, d); }
     d.loading = true;
     d.error = null;
     d.pointer = t.pointer;
-    this.touch(cx);
     try {
+      this.touch(cx);
       d.api = await this.apiFor(t.pointer);
       const { pointer } = d;
       const [pl, review, comments] = await Promise.all([
@@ -435,11 +447,22 @@ export default class PlanReview extends View {
       await this.resolveImages(d);
     } catch (e) {
       if (e?.down) this.server.down = true;
-      d.error = e?.down ? null : e?.message ?? String(e);
+      d.error = e?.down ? null : loadErrorText(e);
+    } finally {
+      d.loading = false;
     }
-    d.loading = false;
     this.touch(cx);
     return d;
+  }
+
+  /** A load that failed outside ensureDoc's own catch: the plan says why, with "Try again". */
+  failDoc(t, e) {
+    const key = this.docKey(t.pointer);
+    let d = this.docs.get(key);
+    if (!d) { d = newDoc(key, t.pointer); this.docs.set(key, d); }
+    if (d.plan) return;
+    d.loading = false;
+    d.error = loadErrorText(e);
   }
 
   /** New review state and comments from the server; redraws only when something changed. */

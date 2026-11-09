@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createApi, ApiError } from "../api.js";
+import { createApi, ApiError, loadErrorText } from "../api.js";
 import { delivery, withDelivery, sentLabel, decisionState } from "../review.js";
 
 // A fake fetch: records each call, answers from a table of "METHOD path" → [status, body].
@@ -96,4 +96,10 @@ test("decisionState: the bar's label per review status", () => {
   assert.equal(decisionState({ status: "approved", notes: "x" }).label, "Approved with comments");
   assert.equal(decisionState({ status: "rejected" }).tone, "blocked");
   assert.equal(decisionState(null).label, "No review");
+});
+
+test("loadErrorText names Herdr's task limit and keeps other messages", () => {
+  assert.match(loadErrorText(new Error("cx.spawn(fn) exceeded the per-runtime outstanding host task limit of 1024")), /Restart Herdr/);
+  assert.equal(loadErrorText(new Error("Request failed (500)")), "Request failed (500)");
+  assert.equal(loadErrorText("boom"), "boom");
 });
