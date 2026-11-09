@@ -18,7 +18,7 @@
 // install`) and agent-plan-review's server.json. "Start server" runs install.json's command.
 
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, TextareaState, Textarea, Popover } from "gpui-base";
+import { v_flex, h_flex, TextareaState, Textarea, Popover, TextView } from "gpui-base";
 import { props, theme, settings, appHome, readTextFile, exec, notify, watchFolder, nextCommand, run, setShared, openOverlay, closeOverlay, focused, panes, agents, shared, layout } from "herdr";
 import { planFromDocs, planWithRemoved, pageOr, neighbour, ancestors, treeRows } from "./plan.js";
 import { parsePage, wordText, tableColumns, tableWidth } from "./markdown.js";
@@ -1513,7 +1513,8 @@ export default class PlanReview extends View {
         .child(div().text_size(12.5).font_weight(600).text_color(t.foreground).child(m.author === "agent" ? agent : "You"))
         .child(div().text_size(11.5).text_color(t.dim).child(ago(m.at)))
         .when(m.author === "you" && m.delivery === "ask", (x) => x.child(this.chip("Asked", t.ansi5, c))))
-      .child(div().pl(30).text_size(13.5).line_height("20px").text_color(t.foreground).child(m.body));
+      // Agents write markdown (lists, **bold**, `code`): draw it as such.
+      .child(div().pl(30).min_w(0).text_size(13.5).line_height("20px").text_color(t.foreground).child(TextView.markdown(`msg-${th.id}-${k}`, m.body ?? "")));
     const head = h_flex().w_full().gap(6).items_center()
       .when(th.kind === "page", (x) => x.child(this.chip("Whole page", t.accent, c)))
       .when(!!th.detached, (x) => x.child(this.chip(th.side === "old" ? "Removed text" : "Text changed", t.blocked, c)))
