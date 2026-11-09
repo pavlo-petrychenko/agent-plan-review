@@ -21,14 +21,14 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea, Popover } from "gpui-base";
 import { props, theme, settings, appHome, readTextFile, exec, notify, watchFolder, nextCommand, run, setShared, openOverlay, closeOverlay, focused, panes, agents, shared, layout } from "herdr";
 import { planFromDocs, planWithRemoved, pageOr, neighbour, ancestors, treeRows } from "./plan.js";
-import { parsePage, wordText } from "./markdown.js";
-import { range, inRange, extend, flowRange, rangeText, tintMap, threadAt } from "./selection.js";
+import { parsePage, wordText, tableColumns, tableWidth } from "./markdown.js";
+import { range, inRange, extend, flowRange, rangeText, tintMap, threadAt, linkRange } from "./selection.js";
 import { threadsFromComments, anchorOf, openCounts, layoutMargin, ago } from "./threads.js";
 import { makeUnits, changedUnits, unitsByBlock } from "./units.js";
 import { POINTER_DIR, IMAGE_DIR, STACK, AGENT_VIEW, PLAN_VIEW, VIEW_KEY, STATES, parsePointer, terminalOfFile, touchesPointers, planFor, stackActive, harnessName, NOTIFIED_KEY, noticeKey, planNotice } from "./pointer.js";
 import { parseInstall, serverUrl, reviewPageUrl, startScript, pollDelay } from "./server.js";
 import { createApi, loadErrorText } from "./api.js";
-import { delivery, withDelivery, sentLabel, decisionState } from "./review.js";
+import { delivery, withDelivery, decisionState } from "./review.js";
 import { buildDiffPage, collapseRows, removedRowOf } from "./diff.js";
 import { VERSION_STATES, PAGE_MARKS, versionList, shownVersion, pointerFor, diffBase, stepBase, neighbourVersion, diffIndex } from "./versions.js";
 
@@ -756,6 +756,17 @@ export default class PlanReview extends View {
     }
   }
 
+  // The link under the pointer, underlined as a whole: [from, to] of its words, or null. Only the
+  // units holding those words redraw.
+  hoverLink(i, cx) {
+    const next = i == null ? null : linkRange(this.page()?.words ?? [], i);
+    const before = this.linkHover ?? null;
+    if (before?.[0] === next?.[0] && before?.[1] === next?.[1]) return;
+    this.linkHover = next;
+    if (!this.ui) return;
+    for (const u of changedUnits(before, next, this.ui.wordUnit)) { const e = this.ui.ents.get(u); if (e) cx.notify(e); }
+  }
+
   // The selection: redraw only the units whose words changed tint.
   setSel(next, cx) {
     const before = range(this.sel);
@@ -864,7 +875,8 @@ export default class PlanReview extends View {
     const anchor = c.r ? anchorOf(this.page().words, c.r) : { line: null, lineEnd: null, quote: null };
     const input = withDelivery({ doc: this.slug, ...anchor, body }, d.review, d.pointer.version, kind);
     cx.spawn(async (cx) => {
-      const made = await this.send("comment", cx, (api) => api.addComment(d.pointer.projectKey, d.pointer.version, input), () => sentLabel(input, d.review, d.pointer.version));
+      // No toast: the new thread on the page is the confirmation (errors still toast).
+      const made = await this.send("comment", cx, (api) => api.addComment(d.pointer.projectKey, d.pointer.version, input));
       if (!made) return;
       if (this.composer === c) this.closeComposer();
       this.setSel(null, cx);
@@ -896,7 +908,7 @@ export default class PlanReview extends View {
     const d = this.doc;
     const input = withDelivery({ body }, d.review, d.pointer.version, kind);
     cx.spawn(async (cx) => {
-      const made = await this.send("reply", cx, (api) => api.reply(d.pointer.projectKey, d.pointer.version, r.id, input), () => sentLabel(input, d.review, d.pointer.version));
+      const made = await this.send("reply", cx, (api) => api.reply(d.pointer.projectKey, d.pointer.version, r.id, input));
       if (made && this.replying === r) this.closeReply();
       this.touch(cx);
     });
@@ -1024,14 +1036,19 @@ export default class PlanReview extends View {
       if (s.bold) d = d.font_weight(650);
       if (s.italic || s.kind === "comment") d = d.italic();
       if (s.strike) d = d.line_through();
-      if (s.link) d = d.text_color(t.accent).cursor_pointer();
+      if (s.link) d = d.text_color(t.accent).when(inRange(this.linkHover, w.i), (x) => x.underline());
       if (s.kind) d = d.text_color(c.syntax[s.kind] ?? t.foreground);
       return d;
     };
-    const hooks = (el) => el.id(`w-${this.slug}-${w.i}`).flex_none().cursor_text()
+    const isLink = w.segs.some((s) => s.link);
+    const hooks = (el) => el.id(`w-${this.slug}-${w.i}`).flex_none().when(isLink, (x) => x.cursor_pointer()).when(!isLink, (x) => x.cursor_text())
       .on_mouse_down("left", (e, cx) => this.down(w.i, e, cx))
       .on_mouse_up("left", (_e, _cx) => { if (this.press) this.press.up = w.i; })
-      .on_hover((h, cx) => { if (h && this.press) this.drag(w.i, cx); });
+      .on_hover((h, cx) => {
+        if (h && this.press) this.drag(w.i, cx);
+        if (isLink) this.hoverLink(h ? w.i : null, cx);
+        else if (h && this.linkHover) this.hoverLink(null, cx);
+      });
     const s0 = w.segs[0];
     const chip = (s) => s.code && !w.code;
     if (w.segs.length === 1 && !chip(s0) && !w.spaceCode && (!bg || contNext || !spaceText)) {
@@ -1096,7 +1113,7 @@ export default class PlanReview extends View {
           .child(div().w(3).flex_none().self_stretch().rounded(2).bg(t.accent + "88"))
           .child(v_flex().flex_1().min_w(0).gap(10).text_color(t.muted).children(b.blocks.map((x) => this.block(x, ctx, true))));
       case "list": return this.listPart(b, 0, b.items.length, ctx);
-      case "table": return this.tableFrame(b, c).children([this.tablePart(b, 0, b.rows.length + 1, ctx)]);
+      case "table": return this.tableFrame(b, c, [this.tablePart(b, 0, b.rows.length + 1, ctx)], ctx.textW);
       case "code": return this.codeFrame(b, c).child(this.codeBody(b, c).child(this.codePart(b, 0, b.lines.length, ctx)));
     }
     return div();
@@ -1115,19 +1132,21 @@ export default class PlanReview extends View {
     }));
   }
 
-  tableFrame(b, c) {
-    return v_flex().w_full().rounded(8).border_1().border_color(c.t.border).overflow_hidden();
+  // The table's border box around its rows. A table whose columns need more than the text width
+  // keeps them and scrolls sideways instead of squeezing long words.
+  tableFrame(b, c, kids, width) {
+    const need = tableWidth(this.tableWeights(b));
+    const box = v_flex().rounded(8).border_1().border_color(c.t.border).overflow_hidden().children(kids);
+    if (need <= width) return box.w_full();
+    return div().id(`tbl-${this.slug}-${b.line}`).w_full().pb(10).overflow_x_scrollbar().child(box.w(need));
   }
 
   tableWeights(b) {
     const cache = this.ui?.weights;
     if (cache?.has(b.line)) return cache.get(b.line);
-    const ws = b.header.map((_, k) => {
-      const len = Math.max(...[b.header[k], ...b.rows.map((r) => r[k])].map((f) => f.words.reduce((n, w) => n + wordText(w).length + 1, 0)));
-      return Math.max(1, Math.min(6, Math.sqrt(len)));
-    });
-    cache?.set(b.line, ws);
-    return ws;
+    const cols = tableColumns(b);
+    cache?.set(b.line, cols);
+    return cols;
   }
 
   // Table rows [from, to): row 0 is the header.
@@ -1143,7 +1162,7 @@ export default class PlanReview extends View {
       return h_flex().id(`tr-${this.slug}:${b.line}:${n}`).w_full()
         .on_size_change((sz, _cx) => this.measureSub(`${this.slug}:${b.line}:${n}`, sz.height)).items_stretch()
         .when(!last, (x) => x.border_b(1).border_color(t.border)).when(head, (x) => x.bg(c.codeBg))
-        .children(cells.map((f, j) => div().flex_grow(ws[j]).flex_basis(0).min_w(0).px(12).py(7).when(j < cols - 1, (x) => x.border_r(1).border_color(t.border))
+        .children(cells.map((f, j) => div().flex_grow(ws[j].grow).flex_basis(0).min_w(ws[j].min).overflow_hidden().px(12).py(7).when(j < cols - 1, (x) => x.border_r(1).border_color(t.border))
           .child(this.flow(f, ctx, { size: 14, line: 22, weight: head ? 600 : null, center: b.align[j] === "center", right: b.align[j] === "right" }))));
     }));
   }
@@ -1314,7 +1333,7 @@ export default class PlanReview extends View {
     }
     win.y += b.type === "code" ? 10 : b.type === "table" ? 1 : 0;
     if (b.type === "list") return v_flex().w_full().gap(4).children(kids);
-    if (b.type === "table") return this.tableFrame(b, c).children(kids);
+    if (b.type === "table") return this.tableFrame(b, c, kids, this.textW ?? TEXT_DEFAULT);
     if (b.type === "code") return this.codeFrame(b, c).child(this.codeBody(b, c).children(kids));
     return kids[0];
   }
