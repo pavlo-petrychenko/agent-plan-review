@@ -56,9 +56,12 @@ export function createApiRouter(store: PlanReviewStore): Router {
   // -------------------------------------------------------------------------
   // projects
   // -------------------------------------------------------------------------
-  api.get('/projects', wrap(async (_req, res) => {
+  // ?cwd=<worktree path> → only that worktree's projects (its plans + legacy
+  // project); the Herdr mod counts "other plans in this worktree" with it.
+  api.get('/projects', wrap(async (req, res) => {
     await store.pruneResolved();
-    res.json(await store.listProjects());
+    const cwd = typeof req.query.cwd === 'string' && req.query.cwd.trim() ? req.query.cwd.trim() : undefined;
+    res.json(await store.listProjects(cwd));
   }));
 
   api.get('/projects/:key', wrap(async (req, res) => {
@@ -70,6 +73,8 @@ export function createApiRouter(store: PlanReviewStore): Router {
     res.json({ ok: true });
   }));
 
+  // body.to is the target project key, or "new-plan": a new plan in the source's
+  // worktree (the way to split a worktree project that mixes several agents).
   api.post('/projects/:key/move', wrap(async (req, res) => {
     const to = req.body?.to;
     if (typeof to !== 'string' || !to.trim()) throw badRequest('body.to (target project key) is required');
@@ -209,7 +214,7 @@ export function createApiRouter(store: PlanReviewStore): Router {
   // plans (tools-first creation fallback)
   // -------------------------------------------------------------------------
   api.post('/plans', wrap(async (req, res) => {
-    const { cwd, markdown, plan, docs, name, images } = req.body ?? {};
+    const { cwd, markdown, plan, docs, name, images, agentId, planId, newPlan, agent } = req.body ?? {};
     if (typeof cwd !== 'string' || !cwd.trim()) throw badRequest('cwd is required');
     const source = docs ? { docs } : typeof markdown === 'string' ? { markdown } : typeof plan === 'string' ? { markdown: plan } : null;
     if (!source) throw badRequest('Provide one of: docs[], markdown, plan');
@@ -222,6 +227,14 @@ export function createApiRouter(store: PlanReviewStore): Router {
       markdown: source.markdown,
       docs: source.docs,
       images,
+      // Plan routing, as the MCP tools and hooks pass it (see store/record.ts).
+      agentId: typeof agentId === 'string' && agentId.trim() ? agentId.trim() : undefined,
+      planId: typeof planId === 'string' && planId.trim() ? planId.trim() : undefined,
+      newPlan: newPlan === true,
+      agent:
+        typeof agent?.terminal === 'string' && agent.terminal
+          ? { terminal: agent.terminal, ...(typeof agent.harness === 'string' ? { harness: agent.harness } : {}) }
+          : undefined,
     });
     if (!result.isLoser) {
       const { openBrowser } = await import('../integrations/browser.js');

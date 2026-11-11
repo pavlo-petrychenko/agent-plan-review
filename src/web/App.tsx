@@ -45,6 +45,12 @@ function ReviewWorkspace() {
     }
   }, [params.project, projects.data, setParams]);
 
+  // `?picker=1` opens the project picker once, then leaves the URL clean.
+  const [pickerOnLoad] = useState(params.picker);
+  useEffect(() => {
+    if (params.picker) setParams({ picker: null });
+  }, [params.picker, setParams]);
+
   const detail = useApi(projectKey ? keys.project(projectKey) : null, () =>
     endpoints.getProject(projectKey!),
   );
@@ -312,6 +318,7 @@ function ReviewWorkspace() {
       <Header
         projects={projects.data}
         activeProject={projectKey}
+        pickerOpen={pickerOnLoad}
         onProjectChange={(key) =>
           setParams({ project: key, version: null, doc: null, review: null }, { push: true })
         }

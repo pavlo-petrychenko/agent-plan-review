@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { BulkDeleteResponse, ProjectDetail, ProjectSummary } from '../../../shared/types.js';
+import { NEW_PLAN_TARGET, type BulkDeleteResponse, type ProjectDetail, type ProjectSummary } from '../../../shared/types.js';
 import { refresh as refreshCache, useApi } from '../../api/cache.js';
 import { endpoints, keys } from '../../api/endpoints.js';
 import { Button, EmptyState, ErrorNote, Modal, Pill, Select, Spinner } from '../primitives.js';
@@ -227,6 +227,14 @@ function ProjectSection({
         </button>
         <IconFolder className="h-4 w-4 shrink-0 text-ink-muted" />
         <span className="text-[13.5px] font-semibold">{summary.name}</span>
+        {summary.plan ? (
+          <span className="flex min-w-0 items-baseline gap-1.5 text-[13px]">
+            <span className="truncate">{summary.plan.title}</span>
+            <span className="font-mono text-[10.5px] text-ink-faint">{summary.plan.id}</span>
+          </span>
+        ) : (
+          <span className="text-[12px] text-ink-faint">Worktree plan (old)</span>
+        )}
         <span className="font-mono text-[11px] text-ink-faint">
           {versions.length} version{versions.length === 1 ? '' : 's'}
         </span>
@@ -324,8 +332,6 @@ function MoveControl({
   const [open, setOpen] = useState(false);
   const [to, setTo] = useState('');
 
-  if (others.length === 0) return null;
-
   if (!open) {
     return (
       <Button
@@ -333,7 +339,7 @@ function MoveControl({
         variant="ghost"
         disabled={busy}
         onClick={() => {
-          setTo(others[0].key);
+          setTo(others[0]?.key ?? NEW_PLAN_TARGET);
           setOpen(true);
         }}
       >
@@ -346,9 +352,10 @@ function MoveControl({
   return (
     <div className="flex items-center gap-1.5">
       <Select size="sm" value={to} onChange={(e) => setTo(e.target.value)} aria-label="Target project">
+        <option value={NEW_PLAN_TARGET}>New plan in this worktree</option>
         {others.map((p) => (
           <option key={p.key} value={p.key}>
-            {p.name}
+            {p.plan ? `${p.name} — ${p.plan.title} (${p.plan.id})` : p.name}
           </option>
         ))}
       </Select>

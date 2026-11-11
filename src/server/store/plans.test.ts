@@ -12,6 +12,7 @@ import path from 'node:path';
 import { PlanReviewStore } from './store.js';
 import { PlanSelectionError, PlanValidationError } from '../util/errors.js';
 import { parsePlanProjectKey, sanitizeProjectKey } from '../../shared/keys.js';
+import { NEW_PLAN_TARGET } from '../../shared/types.js';
 import type { RecordInput } from './record.js';
 
 function makeStore(): PlanReviewStore {
@@ -273,4 +274,81 @@ test('a hook that fires twice for one ExitPlanMode call lands on ONE new plan', 
   assert.equal(x.projectKey, y.projectKey);
   assert.equal((await store.projects.listByWorktree(cwd)).length, 1);
   assert.equal([x.isLoser, y.isLoser].filter(Boolean).length, 1);
+});
+
+test('moving versions to "new-plan" splits a mixed worktree project into a plan of the same worktree', async () => {
+  const store = makeStore();
+  const cwd = makeDir('apr-plans-split-');
+  const legacyKey = sanitizeProjectKey(cwd);
+  // The old worktree plan: A's plan at v1 and v3, agent B's plan joined it at v2 (by key).
+  await submit(store, cwd, '# Plan A\n\nalpha');
+  const b = await submit(store, cwd, '# Plan B\n\nbeta', { planId: legacyKey, agentId: 'claude:b', agent: { terminal: 'tB' } });
+  await submit(store, cwd, '# Plan A\n\nalpha two');
+  assert.equal(b.projectKey, legacyKey);
+  await store.addComment(legacyKey, 2, { body: 'about B', doc: 'root', line: 3 });
+
+  const res = await store.moveVersions(legacyKey, NEW_PLAN_TARGET, [2]);
+  const created = parsePlanProjectKey(res.to);
+  assert.ok(created, 'a plan key');
+  assert.equal(created.worktreeKey, legacyKey);
+  assert.deepEqual(res.moved, [{ from: 2, to: 1 }]);
+  assert.equal(res.sourceRemoved, false);
+
+  const meta = await store.projects.get(res.to);
+  assert.equal(meta?.cwd, cwd);
+  assert.equal(meta?.plan?.id, created.planId);
+  assert.equal(meta?.plan?.title, 'Plan B');
+  assert.deepEqual(meta?.agents, ['claude:b']);
+  assert.equal(meta?.currentVersion, 1);
+  assert.equal((await store.getReview(b.reviewId))?.projectKey, res.to);
+  assert.equal((await store.listComments(res.to, 1)).length, 1);
+  assert.deepEqual(
+    (await store.getProjectDetail(legacyKey)).versions.map((v) => v.n),
+    [1, 3],
+    'the source keeps its other versions',
+  );
+
+  // The worktree now has the legacy project and the new plan.
+  assert.equal((await store.listProjects(cwd)).length, 2);
+  assert.deepEqual((await store.projects.get(legacyKey))?.agents, [], 'the source no longer claims B');
+  // B's next submission continues the new plan.
+  const b2 = await submit(store, cwd, '# Plan B\n\nbeta revised', { agentId: 'claude:b' });
+  assert.equal(b2.projectKey, res.to);
+  assert.equal(b2.version, 2);
+});
+
+test('moving to "new-plan" without versions moves everything; an empty selection creates nothing', async () => {
+  const store = makeStore();
+  const cwd = makeDir('apr-plans-split2-');
+  await submit(store, cwd, '# Old\n\none');
+  await assert.rejects(() => store.moveVersions(sanitizeProjectKey(cwd), NEW_PLAN_TARGET, [9]), /No versions/);
+  assert.equal((await store.projects.listByWorktree(cwd)).length, 1);
+
+  const res = await store.moveVersions(sanitizeProjectKey(cwd), NEW_PLAN_TARGET);
+  assert.equal(res.sourceRemoved, true);
+  const [only] = await store.projects.listByWorktree(cwd);
+  assert.equal(only.key, res.to);
+  assert.equal(only.plan?.title, 'Old');
+});
+
+test('listProjects: ?cwd narrows to one worktree; lastTerminal is the newest review with a terminal', async () => {
+  const store = makeStore();
+  const cwd = makeDir('apr-plans-list-');
+  const other = makeDir('apr-plans-list-other-');
+  const a = await submit(store, cwd, '# A\n\na', { agentId: 'claude:a', agent: { terminal: 't1' } });
+  await new Promise((r) => setTimeout(r, 5));
+  await submit(store, cwd, '# A\n\na2', { agentId: 'claude:a', agent: { terminal: 't2' } });
+  await new Promise((r) => setTimeout(r, 5));
+  const b = await submit(store, cwd, '# B\n\nb', { agentId: 'claude:b' });
+  await submit(store, other, '# Elsewhere\n\nx', { agentId: 'claude:c' });
+
+  const all = await store.listProjects();
+  assert.equal(all.length, 3);
+  const inWorktree = await store.listProjects(cwd);
+  assert.deepEqual(inWorktree.map((p) => p.key).sort(), [a.projectKey, b.projectKey].sort());
+  const sa = inWorktree.find((p) => p.key === a.projectKey)!;
+  assert.equal(sa.lastTerminal, 't2');
+  assert.equal(sa.pending, 2);
+  assert.equal(sa.versionCount, 2);
+  assert.equal(inWorktree.find((p) => p.key === b.projectKey)!.lastTerminal, undefined);
 });
