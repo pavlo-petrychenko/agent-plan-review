@@ -14,6 +14,11 @@
 // the keyboard itself, so plan keys never reach the hidden agent terminal. Commands (keys.json, `run`):
 // `plan-review.back` / `.flip` (to the agent, keyboard back to its pane), `.focus` (take the keyboard).
 //
+// Images: a click on an image opens the viewer (viewer.js): fit, zoom (⌘/Ctrl+scroll at the pointer,
+// + / - / 0 / 1, buttons), pan (drag, scroll), ← / → between the page's images, Esc or × to close.
+// Commands: `plan-review.view-image[-N]` opens the (Nth) image; `plan-review.viewer-<in|out|fit|
+// actual|next|prev|close>`.
+//
 // Server: the pointer's `server`, else install.json (written by `agent-plan-review herdr
 // install`) and agent-plan-review's server.json. "Start server" runs install.json's command.
 
@@ -30,6 +35,7 @@ import { parseInstall, serverUrl, reviewPageUrl, startScript, pollDelay } from "
 import { createApi, loadErrorText } from "./api.js";
 import { delivery, withDelivery, decisionState } from "./review.js";
 import { buildDiffPage, collapseRows, removedRowOf } from "./diff.js";
+import { fitView, actualView, scaleOf, isFit, clampView, zoomAt, stepView, wheelFactor, panView, toggleView, imageRect, onImage, pageImages, neighbourImage, percent } from "./viewer.js";
 import { VERSION_STATES, PAGE_MARKS, versionList, shownVersion, pointerFor, diffBase, stepBase, neighbourVersion, diffIndex } from "./versions.js";
 
 const MOD = "mods/plan-review";
@@ -44,6 +50,7 @@ const BASE = 15;
 const LINE = 26;
 const COMPOSER = "__composer";
 const GAP_H = 30; // a folded run of unchanged lines in a diff
+const VIEWER_BAR = 44; // the image viewer's bottom bar
 // Herdr's bundled UI font draws no bold or italic; the system font has both.
 const PROSE_FONT = ".SystemUIFont";
 const IMAGE_RE = /(?:^|\/)api\/images\/([A-Za-z0-9._-]+)$/;
@@ -67,6 +74,13 @@ class UnitView extends View {
   init(p) { this.p = p; }
   update(p) { this.p = p; }
   render(_cx) { return HOSTS.get(this.p.host)?.unitElement(this.p.key, this.p.unit) ?? div(); }
+}
+
+// The image viewer layer: a retained view, so zoom and pan redraw only it, not the page under it.
+class ViewerView extends View {
+  init(p) { this.p = p; }
+  update(p) { this.p = p; }
+  render(_cx) { return HOSTS.get(this.p.host)?.viewerElement() ?? div(); }
 }
 
 export default class PlanReview extends View {
@@ -115,6 +129,8 @@ export default class PlanReview extends View {
     this.diffOn = false; // diff mode: the shown version against an earlier one
     this.baseOf = new Map(); // terminal → the chosen base version
     this.allExpanded = false; // diff mode: every unchanged line shown
+    this.viewer = null; // the open image viewer: { doc, slug, list, idx, view, pane, drag, openedAt, ent }
+    this.viewerGone = null; // a closed viewer's view, released by the load loop
 
     // Units are made outside render: render asks for them, this task makes them (a few per frame).
     // It also loads the plan render asked for, and redraws this view for handlers that run in a
@@ -136,6 +152,7 @@ export default class PlanReview extends View {
           if (this.doc?.plan && this.slug && this.ui?.key !== this.pageKey()) this.prepareUnits(cx);
           else if (this.ui && this.ui.next < this.ui.units.length) this.createUnits(cx, 1500);
           this.touch(cx);
+          this.reapViewer(cx);
         } catch (e) {
           console.error("plan-review: the load step failed:", e?.message ?? e);
           if (want) this.failDoc(want, e);
@@ -164,6 +181,7 @@ export default class PlanReview extends View {
         else if (c === "close-window" && this.windowed) closeOverlay(props()?.overlay);
         else if (c === "refresh" && this.doc) await this.refreshDoc(this.doc, cx, { force: true });
         else if (c === "start-server" && this.server.down && !this.server.starting) await this.startServer(cx);
+        else if (this.viewer || /^view-image/.test(c)) this.viewerCommand(c, cx);
         else if (this.page()) this.command(c, cx);
         else if (c === "virtual") { this.virtual = this.virtual === false; console.log("plan-review: mount only near the viewport:", this.virtual); }
         this.touch(cx);
@@ -670,6 +688,7 @@ export default class PlanReview extends View {
 
   flipBack() {
     if (this.windowed || !this.hasStack()) return;
+    this.closeViewer(false);
     run("layout.select", { stack: STACK, child: AGENT_VIEW });
     setShared(VIEW_KEY, AGENT_VIEW);
     // Give the keyboard back to the tab's pane, so typing reaches the agent again.
@@ -980,7 +999,237 @@ export default class PlanReview extends View {
     });
   }
 
+  // ---------------------------------------------------------------------------- image viewer
+
+  // A click on an image of the page: a layer over the whole view, with the page's images to step through.
+  openViewer(src, cx) {
+    const page = this.page();
+    if (this.viewer || !page?.blocks) return;
+    const list = this.pageImageList(page);
+    const idx = list.findIndex((x) => x.src === src);
+    if (idx < 0) return;
+    this.sel = this.pill = null;
+    this.viewer = { doc: this.doc, slug: this.slug, list, idx, view: fitView(), pane: null, drag: null, openedAt: Date.now(), ent: null };
+    try { this.viewer.ent = cx.new(ViewerView, { host: this.hostId }); } catch (err) {
+      console.error("plan-review: the image viewer did not open:", err?.message ?? err);
+      this.viewer = null;
+      return;
+    }
+    this.handle.focus();
+    this.wakeHost();
+  }
+
+  pageImageList(page) {
+    return pageImages(page.blocks, (s) => { const m = this.images.get(s); return !!m && !m.missing && !!m.path; });
+  }
+
+  // Closes the viewer. The page keeps its scroll position (the viewer is a layer over it). The
+  // view itself is released a moment later by the load loop, not inside its own handler.
+  closeViewer(focus = true) {
+    const v = this.viewer;
+    if (!v) return;
+    this.viewer = null;
+    if (v.ent) this.viewerGone = v.ent;
+    if (focus) { try { this.handle.focus(); } catch {} }
+    this.wakeHost();
+  }
+
+  reapViewer(cx) {
+    const ent = this.viewerGone;
+    if (!ent) return;
+    this.viewerGone = null;
+    cx.spawn(async (cx) => { await sleep(cx, 150); try { ent.release(); } catch {} });
+  }
+
+  // The viewer's own redraw. From a handler inside the viewer (`own`) that is cx.notify(); from the
+  // plan view it is cx.notify(entity), which throws when Herdr invalidated the entity: then make a new one.
+  redrawViewer(cx, own = false) {
+    const v = this.viewer;
+    if (!v) return;
+    try { if (own) cx.notify(); else cx.notify(v.ent); } catch (err) {
+      console.warn("plan-review: the image viewer is no longer valid; making it again:", err?.message ?? err);
+      if (v.ent) this.viewerGone = v.ent;
+      try { v.ent = cx.new(ViewerView, { host: this.hostId }); } catch { this.viewer = null; }
+      this.wakeHost();
+    }
+  }
+
+  viewerImage() {
+    const v = this.viewer;
+    const cur = v?.list[v.idx];
+    const m = cur ? this.images.get(cur.src) : null;
+    return m && m.path && !m.missing && m.w > 0 && m.h > 0 ? { cur, img: { w: m.w, h: m.h, path: m.path } } : null;
+  }
+
+  // The area the image is shown in (until the first layout: a guess from the plan view).
+  viewerPane() {
+    return this.viewer?.pane ?? { w: this.width, h: Math.max(200, (this.viewH ?? 700) - VIEWER_BAR) };
+  }
+
+  viewerSet(view, cx, own = false) {
+    if (!this.viewer) return;
+    this.viewer.view = view;
+    this.redrawViewer(cx, own);
+  }
+
+  // One of: in, out, fit, actual, next, prev, close. Zooms at the centre of the pane.
+  viewerAction(a, cx, own = false) {
+    const v = this.viewer;
+    const cur = this.viewerImage();
+    if (!v || !cur) return;
+    const pane = this.viewerPane(), { img } = cur;
+    if (a === "close") { this.closeViewer(); return; }
+    if (a === "in" || a === "out") return this.viewerSet(stepView(v.view, a === "in" ? 1 : -1, pane, img), cx, own);
+    if (a === "fit") return this.viewerSet(fitView(), cx, own);
+    if (a === "actual") return this.viewerSet(actualView(), cx, own);
+    if (a === "next" || a === "prev") {
+      const j = neighbourImage(v.idx, a === "next" ? 1 : -1, v.list.length);
+      if (j === v.idx) return;
+      v.idx = j;
+      v.view = fitView();
+      this.redrawViewer(cx, own);
+    }
+  }
+
+  // Keys while the viewer is open: its own, and nothing else reaches the plan's commands.
+  viewerKey(e, cx) {
+    const m = e.modifiers ?? {};
+    const k = e.key ?? e.keystroke;
+    const plain = !m.control && !m.alt && !m.platform;
+    let a = null;
+    if (e.keystroke === "escape") a = "close";
+    else if (plain && (k === "+" || k === "=")) a = "in";
+    else if (plain && (k === "-" || k === "_")) a = "out";
+    else if (plain && k === "0") a = "fit";
+    else if (plain && k === "1") a = "actual";
+    else if (plain && !m.shift && (k === "left" || k === "right")) a = k === "left" ? "prev" : "next";
+    if (!a) return;
+    cx.stop_propagation();
+    this.viewerAction(a, cx);
+    if (a === "close") this.touch(cx);
+  }
+
+  // `plan-review.view-image` (the first image of the page; `view-image-2`: the second), and
+  // `plan-review.viewer-<in|out|fit|actual|next|prev|close>`.
+  viewerCommand(c, cx) {
+    const open = /^view-image(?:-(\d+))?$/.exec(c);
+    if (open && !this.viewer) {
+      const page = this.page();
+      const list = page?.blocks ? this.pageImageList(page) : [];
+      const at = list[(open[1] ? +open[1] : 1) - 1];
+      if (at) this.openViewer(at.src, cx);
+    } else if (this.viewer && c.startsWith("viewer-")) this.viewerAction(c.slice(7), cx);
+  }
+
+  viewerDown(e, cx) {
+    cx.stop_propagation();
+    const v = this.viewer, cur = this.viewerImage();
+    if (!v || !cur || !e.local_position) return;
+    // The press that opened the viewer may be the first half of a double click on the plan's image.
+    if (Date.now() - v.openedAt < 450) return;
+    const pane = this.viewerPane(), { img } = cur;
+    const on = onImage(imageRect(v.view, pane, img), e.local_position.x, e.local_position.y);
+    if (e.click_count >= 2) {
+      v.drag = null;
+      if (on) this.viewerSet(toggleView(v.view, { x: e.local_position.x - pane.w / 2, y: e.local_position.y - pane.h / 2 }, pane, img), cx, true);
+      return;
+    }
+    v.drag = { x: e.position.x, y: e.position.y, lastX: e.position.x, lastY: e.position.y, moved: false, on };
+  }
+
+  viewerMove(e, cx) {
+    const v = this.viewer, d = v?.drag, cur = this.viewerImage();
+    if (!d || !cur) return;
+    const dx = e.position.x - d.lastX, dy = e.position.y - d.lastY;
+    d.lastX = e.position.x;
+    d.lastY = e.position.y;
+    if (!d.moved && Math.hypot(e.position.x - d.x, e.position.y - d.y) > 3) { d.moved = true; cx.notify(); }
+    if (d.moved && (dx || dy)) this.viewerSet(panView(v.view, dx, dy, this.viewerPane(), cur.img), cx, true);
+  }
+
+  // A press and release on the backdrop (not on the image, not a drag) closes.
+  viewerUp(_e, cx) {
+    cx.stop_propagation();
+    const d = this.viewer?.drag;
+    if (!d) return;
+    this.viewer.drag = null;
+    if (!d.moved && !d.on) this.closeViewer(); else cx.notify();
+  }
+
+  viewerWheel(e, cx) {
+    cx.stop_propagation();
+    const v = this.viewer, cur = this.viewerImage();
+    if (!v || !cur) return;
+    const pane = this.viewerPane(), { img } = cur;
+    const m = e.modifiers ?? {};
+    if (m.platform || m.control) {
+      const at = e.local_position ? { x: e.local_position.x - pane.w / 2, y: e.local_position.y - pane.h / 2 } : { x: 0, y: 0 };
+      this.viewerSet(zoomAt(v.view, scaleOf(v.view, pane, img) * wheelFactor(e.delta?.y), at, pane, img), cx, true);
+    } else {
+      this.viewerSet(panView(v.view, e.delta?.x ?? 0, e.delta?.y ?? 0, pane, img), cx, true);
+    }
+  }
+
+  viewerResized(s, cx) {
+    const v = this.viewer;
+    if (!v || (v.pane && Math.abs(v.pane.w - s.width) < 0.5 && Math.abs(v.pane.h - s.height) < 0.5)) return;
+    v.pane = { w: s.width, h: s.height };
+    const cur = this.viewerImage();
+    if (cur) v.view = clampView(v.view, v.pane, cur.img);
+    cx.notify();
+  }
+
+  // The layer: backdrop, the image, a close button, and the bar (zoom, caption, position).
+  viewerElement() {
+    const v = this.viewer, cur = this.viewerImage();
+    if (!v || !cur) return div();
+    const c = this.colors(), { t } = c;
+    const { img } = cur;
+    const pane = this.viewerPane();
+    v.view = clampView(v.view, pane, img);
+    const r = imageRect(v.view, pane, img);
+    const scale = scaleOf(v.view, pane, img);
+    const fit = isFit(v.view, pane, img);
+    const actual = !fit && Math.abs(scale - 1) < 1e-3;
+    const many = v.list.length > 1;
+    const tool = (id, label, icon, run, o = {}) => this.button(`v-${id}`, label, (_e, cx) => run(cx), c, { h: 28, px: label ? 10 : 7, size: 12.5, icon, iconSize: 14, ...o });
+    const bar = h_flex().id("viewer-bar").w_full().flex_none().h(VIEWER_BAR).px(12).gap(8).items_center().bg(t.surface).border_t(1).border_color(t.border)
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_scroll_wheel((_e, cx) => cx.stop_propagation())
+      .child(h_flex().flex_none().gap(2).items_center()
+        .child(tool("out", null, "minus", (cx) => this.viewerAction("out", cx, true), { tip: "Zoom out (-)" }))
+        .child(div().w(52).text_size(12.5).font_family(c.mono).text_color(t.foreground).text_center().child(percent(scale)))
+        .child(tool("in", null, "plus", (cx) => this.viewerAction("in", cx, true), { tip: "Zoom in (+)" }))
+        .child(div().w(6))
+        .child(tool("fit", "Fit", null, (cx) => this.viewerAction("fit", cx, true), { active: fit, tip: "Fit to the pane (0)" }))
+        .child(tool("actual", "100 %", null, (cx) => this.viewerAction("actual", cx, true), { active: actual, tip: "Real size (1)" })))
+      .child(div().flex_1().min_w(0).truncate().text_center().text_size(12.5).text_color(t.muted).child(cur.cur.alt || ""))
+      .when(many, (x) => x.child(h_flex().flex_none().gap(2).items_center()
+        .child(tool("prev", null, "chevron-left", (cx) => this.viewerAction("prev", cx, true), { disabled: v.idx === 0, tip: "Previous image (←)" }))
+        .child(div().w(46).text_size(12.5).font_family(c.mono).text_color(t.muted).text_center().child(`${v.idx + 1} / ${v.list.length}`))
+        .child(tool("next", null, "chevron-right", (cx) => this.viewerAction("next", cx, true), { disabled: v.idx === v.list.length - 1, tip: "Next image (→)" }))));
+    const area = div().id("viewer-area").relative().flex_1().min_h(0).w_full().overflow_hidden()
+      .when(!v.drag?.moved, (x) => x.cursor_grab()).when(!!v.drag?.moved, (x) => x.cursor_grabbing())
+      .on_size_change((s, cx) => this.viewerResized(s, cx))
+      .on_mouse_down("left", (e, cx) => this.viewerDown(e, cx))
+      .on_scroll_wheel((e, cx) => this.viewerWheel(e, cx))
+      .child(div().id("viewer-image").absolute().left(r.x).top(r.y).w(r.w).h(r.h).bg("#ffffff").child(image(img.path).w(r.w).h(r.h)))
+      .child(div().id("viewer-close").absolute().top(14).right(14).size(34).rounded(17).flex().items_center().justify_center()
+        .bg("#000000a0").text_color("#ffffff").cursor_pointer().hover((s) => s.bg("#000000d0"))
+        .tooltip("Close (Esc)")
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => { cx.stop_propagation(); this.closeViewer(); })
+        .child(svg(ICON("x")).size(17)));
+    return v_flex().id("viewer").absolute().inset_0().bg("#0a0a0bfa")
+      .on_mouse_move((e, cx) => this.viewerMove(e, cx))
+      .on_mouse_up("left", (e, cx) => this.viewerUp(e, cx))
+      .on_scroll_wheel((_e, cx) => cx.stop_propagation())
+      .child(area)
+      .child(bar);
+  }
+
   key(e, cx) {
+    if (this.viewer) return this.viewerKey(e, cx);
     const k = e.keystroke;
     if (k === "escape") {
       if (this.versionsOpen) { this.versionsOpen = false; this.handle.focus(); }
@@ -1122,7 +1371,9 @@ export default class PlanReview extends View {
         if (!img || img.missing) return div().w_full().p(14).rounded(8).border_1().border_color(t.border).text_color(t.dim).text_size(13).child(img?.missing ?? `Loading ${b.alt || "image"}…`);
         const w = Math.min(img.w, ctx.textW - 26);
         return v_flex().w_full().items_center().gap(8)
-          .child(div().p(12).rounded(10).bg("#ffffff").border_1().border_color(t.border).child(image(img.path).w(w).h(w * img.h / img.w)))
+          .child(div().id(`img-${this.slug}-${b.line}`).p(12).rounded(10).bg("#ffffff").border_1().border_color(t.border).cursor_pointer()
+            .on_mouse_down("left", (_e, cx) => this.openViewer(b.src, cx))
+            .child(image(img.path).w(w).h(w * img.h / img.w)))
           .when(!!b.alt, (x) => x.child(div().text_size(12.5).text_color(t.dim).child(b.alt)));
       }
       case "quote":
@@ -1909,6 +2160,8 @@ export default class PlanReview extends View {
       this.lastSig = null; // the units redraw without the old selection
       this.wakeHost();
     }
+    // The viewer belongs to one page of one plan version.
+    if (this.viewer && (this.viewer.doc !== this.doc || this.viewer.slug !== this.slug || !this.viewerImage())) this.closeViewer(false);
     if (target && (!d || (!d.plan && !d.loading && !d.error && !this.server.down))) { this.wantDoc = target; this.wakeHost(); }
     const wantBase = this.diffOn && d?.plan ? this.diffBaseOf(d) : null;
     if (wantBase != null && !d.diffs.has(wantBase)) { this.wantDiff = { d, base: wantBase }; this.wakeHost(); }
@@ -2003,6 +2256,7 @@ export default class PlanReview extends View {
     return root.relative()
       .child(h_flex().flex_1().min_h(0).w_full()
         .when(this.sidebarOn(), (x) => x.child(this.sidebarView(c)))
-        .child(main));
+        .child(main))
+      .when(!!this.viewer?.ent, (x) => x.child(this.viewer.ent));
   }
 }
