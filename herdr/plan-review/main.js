@@ -79,14 +79,14 @@ const newDoc = (key, pointer) => ({ key, pointer, pages: new Map(), images: new 
 class UnitView extends View {
   init(p) { this.p = p; }
   update(p) { this.p = p; }
-  render(_cx) { return HOSTS.get(this.p.host)?.unitElement(this.p.key, this.p.unit) ?? div(); }
+  render(cx) { return HOSTS.get(this.p.host)?.drawing(cx, (h) => h.unitElement(this.p.key, this.p.unit)) ?? div(); }
 }
 
 // The image viewer layer: a retained view, so zoom and pan redraw only it, not the page under it.
 class ViewerView extends View {
   init(p) { this.p = p; }
   update(p) { this.p = p; }
-  render(_cx) { return HOSTS.get(this.p.host)?.viewerElement() ?? div(); }
+  render(cx) { return HOSTS.get(this.p.host)?.drawing(cx, (h) => h.viewerElement()) ?? div(); }
 }
 
 export default class PlanReview extends View {
@@ -105,6 +105,7 @@ export default class PlanReview extends View {
     this.hostId = `h${Date.now().toString(36)}${Math.floor(Math.random() * 1e6)}`;
     HOSTS.set(this.hostId, this);
     this.ui = null; // the current page's units and their views
+    this.rendering = null; // the render cx while this view (or one of its units) draws: see wakeHost
     this.storeVersion = 0;
     this.docs = new Map(); // "projectKey@version" → doc
     this.doc = null;
@@ -790,7 +791,19 @@ export default class PlanReview extends View {
     this.ui = null;
   }
 
+  // Wakes the load loop. Never from inside render: the loop would go on inside render's host call
+  // (an AsyncContext speaks for whichever call is running), so the unit views it makes there belong
+  // to that render and come back released ("this Entity has been released and can no longer be
+  // mounted"). Switching to an already loaded plan hit this: render saw the new plan, woke the loop,
+  // and the new page's units died before they were drawn. From render, a timer wakes it instead.
   wakeHost() {
+    if (this.rendering) {
+      if (!this.wakeQueued) {
+        this.wakeQueued = true;
+        this.rendering.timer.after(0, () => { this.wakeQueued = false; this.wakeHost(); });
+      }
+      return;
+    }
     const w = this.waker;
     if (w) { this.waker = null; w(); } else this.wakePending = true;
   }
@@ -2170,7 +2183,16 @@ export default class PlanReview extends View {
     return div().px(6).h(20).rounded(5).border_1().border_color(t.border).bg(t.surface).flex().items_center().font_family(c.mono).text_size(11).text_color(t.muted).child(k);
   }
 
-  render(_cx) {
+  render(cx) { return this.drawing(cx, (h) => h.draw()); }
+
+  /** Runs `fn(this)` as a render: wakeHost knows not to resume the load loop inside it. */
+  drawing(cx, fn) {
+    const was = this.rendering;
+    this.rendering = cx;
+    try { return fn(this); } finally { this.rendering = was; }
+  }
+
+  draw() {
     const c = this.colors();
     const { t } = c;
     const root = v_flex().id("plan-review").size_full().bg(t.background).text_color(t.foreground).font_family(PROSE_FONT).track_focus(this.handle)
