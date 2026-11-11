@@ -752,7 +752,22 @@ export default class PlanReview extends View {
     if (this.ui && sig !== this.lastSig) {
       this.lastSig = sig;
       this.tints = null;
-      for (const e of this.ui.ents.values()) cx.notify(e);
+      this.notifyUnits(cx, this.ui.ents.values());
+    }
+  }
+
+  // Redraws unit views. Herdr can invalidate a unit view under us ("cx.notify(entity) expects a
+  // live Entity from the current application"). Then every later redraw threw, and so did every
+  // plan load ("This plan did not load", Try again did not help). Now the page drops its units and
+  // the load loop makes new ones.
+  notifyUnits(cx, ents) {
+    for (const e of ents) {
+      try { cx.notify(e); } catch (err) {
+        console.warn("plan-review: a unit view is no longer valid; making the page's units again:", err?.message ?? err);
+        this.releaseUnits();
+        this.wakeHost();
+        return;
+      }
     }
   }
 
@@ -764,7 +779,8 @@ export default class PlanReview extends View {
     if (before?.[0] === next?.[0] && before?.[1] === next?.[1]) return;
     this.linkHover = next;
     if (!this.ui) return;
-    for (const u of changedUnits(before, next, this.ui.wordUnit)) { const e = this.ui.ents.get(u); if (e) cx.notify(e); }
+    const ui = this.ui;
+    this.notifyUnits(cx, [...changedUnits(before, next, ui.wordUnit)].map((u) => ui.ents.get(u)).filter(Boolean));
   }
 
   // The selection: redraw only the units whose words changed tint.
@@ -772,7 +788,8 @@ export default class PlanReview extends View {
     const before = range(this.sel);
     this.sel = next;
     if (!this.ui) return;
-    for (const u of changedUnits(before, range(next), this.ui.wordUnit)) { const e = this.ui.ents.get(u); if (e) cx.notify(e); }
+    const ui = this.ui;
+    this.notifyUnits(cx, [...changedUnits(before, range(next), ui.wordUnit)].map((u) => ui.ents.get(u)).filter(Boolean));
   }
 
   // A press on word i. Selection: press, drag, release. The release word (on_mouse_up on the
