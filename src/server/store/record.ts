@@ -341,6 +341,14 @@ async function chooseProject(
   const agentId = input.agentId?.trim() || undefined;
   const planId = input.planId?.trim() || undefined;
   const createPlan = async (): Promise<ProjectMeta> => {
+    // A hook can fire twice for one ExitPlanMode call (two hook scopes, same
+    // tool_use_id). Both fires must land on ONE new plan, as they landed on one
+    // project before plans existed, so the id derives from the tool use id.
+    if (input.toolUseId) {
+      const id = `p-${createHash('sha256').update(`${worktreeKey}\n${input.toolUseId}`).digest('hex').slice(0, 6)}`;
+      const key = planProjectKey(worktreeKey, id);
+      return (await projects.get(key)) ?? projects.createPlan(key, cwd, { id, title: rootTitle }, input.name);
+    }
     let id = newPlanId();
     // 24 random bits per worktree: a clash is unlikely, never fatal.
     while (await projects.get(planProjectKey(worktreeKey, id))) id = newPlanId();

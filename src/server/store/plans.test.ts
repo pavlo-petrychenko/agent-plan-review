@@ -256,3 +256,21 @@ test('a subfolder submit folds onto the worktree root, which many plans share', 
   assert.equal(a2.version, 2);
   assert.equal((await store.getReview(a2.reviewId))?.cwd, cwd);
 });
+
+test('a hook that fires twice for one ExitPlanMode call lands on ONE new plan', async () => {
+  const store = makeStore();
+  const cwd = makeDir('apr-plans-double-');
+  const fire = () =>
+    store.recordPlan({
+      cwd,
+      origin: 'hook',
+      markdown: '# Plan\n\nbody',
+      agentId: 'claude:s1',
+      sessionId: 's1',
+      toolUseId: 'toolu_same',
+    });
+  const [x, y] = await Promise.all([fire(), fire()]);
+  assert.equal(x.projectKey, y.projectKey);
+  assert.equal((await store.projects.listByWorktree(cwd)).length, 1);
+  assert.equal([x.isLoser, y.isLoser].filter(Boolean).length, 1);
+});
