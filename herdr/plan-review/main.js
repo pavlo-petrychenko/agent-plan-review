@@ -19,6 +19,11 @@
 // Commands: `plan-review.view-image[-N]` opens the (Nth) image; `plan-review.viewer-<in|out|fit|
 // actual|next|prev|close>`.
 //
+// Plans: each agent's plan is its own project (key "<worktree key>.p-<6 hex>", opaque here), so a pane
+// shows only its agent's plan. When the worktree has other plans, the top bar says "N other plans";
+// it opens the web UI with the project picker open (worktree.js). The count is one request when a
+// plan loads or its pointer moves (cached 30 s), never polled.
+//
 // Server: the pointer's `server`, else install.json (written by `agent-plan-review herdr
 // install`) and agent-plan-review's server.json. "Start server" runs install.json's command.
 
@@ -33,6 +38,7 @@ import { makeUnits, changedUnits, unitsByBlock } from "./units.js";
 import { POINTER_DIR, IMAGE_DIR, STACK, AGENT_VIEW, PLAN_VIEW, VIEW_KEY, STATES, parsePointer, terminalOfFile, touchesPointers, planFor, stackActive, harnessName, NOTIFIED_KEY, noticeKey, planNotice } from "./pointer.js";
 import { parseInstall, serverUrl, reviewPageUrl, startScript, pollDelay } from "./server.js";
 import { createApi, loadErrorText } from "./api.js";
+import { countOthers, otherPlansLabel, otherPlansTip, plansPageUrl, countStale } from "./worktree.js";
 import { delivery, withDelivery, decisionState } from "./review.js";
 import { buildDiffPage, collapseRows, removedRowOf } from "./diff.js";
 import { fitView, actualView, scaleOf, isFit, clampView, zoomAt, stepView, wheelFactor, panView, toggleView, imageRect, onImage, pageImages, neighbourImage, percent } from "./viewer.js";
@@ -125,6 +131,8 @@ export default class PlanReview extends View {
     this.subH = new Map(); // list item and table row heights, for anchoring cards
     this.cardH = new Map();
     this.projects = new Map(); // project key → { list: [version + review state], raw }
+    this.others = new Map(); // "cwd\nproject key" → { n, at }: how many other plans the worktree has
+    this.othersAsked = new Set(); // the same keys, while a request is out
     this.vpick = new Map(); // terminal → { n, follow }: the version picked while the pointer names `follow`
     this.diffOn = false; // diff mode: the shown version against an earlier one
     this.baseOf = new Map(); // terminal → the chosen base version
@@ -273,7 +281,7 @@ export default class PlanReview extends View {
       this.announce(terminal, ptr);
       // The pointer moves on every agent reply, resolve and decision: refresh what is loaded.
       const d = ptr && this.docs.get(this.docKey(ptr));
-      if (d && d.plan && d.pointer?.updatedAt !== ptr.updatedAt) { d.pointer = ptr; await this.refreshDoc(d, cx); }
+      if (d && d.plan && d.pointer?.updatedAt !== ptr.updatedAt) { d.pointer = ptr; this.loadOthers(d, cx); await this.refreshDoc(d, cx); }
     }
     if (any) this.touch(cx);
   }
@@ -490,6 +498,7 @@ export default class PlanReview extends View {
       this.setThreads(d, comments);
       this.server.down = false;
       d.loadedAt = Date.now();
+      this.loadOthers(d, cx);
       await this.resolveImages(d);
     } catch (e) {
       if (e?.down) this.server.down = true;
@@ -499,6 +508,34 @@ export default class PlanReview extends View {
     }
     this.touch(cx);
     return d;
+  }
+
+  /**
+   * Counts the other plans of the doc's worktree (one request, never awaited by the caller; a
+   * failure just leaves the old count). Asked only when a plan loads or its pointer moves, and
+   * not again within COUNT_TTL: no polling.
+   */
+  loadOthers(d, cx) {
+    const { cwd, projectKey } = d.pointer;
+    if (!cwd || !d.api) return;
+    const key = `${cwd}\n${projectKey}`;
+    if (this.othersAsked.has(key) || !countStale(this.others.get(key), Date.now())) return;
+    this.othersAsked.add(key);
+    d.api.projectsIn(cwd).then(
+      (list) => { this.others.set(key, { n: countOthers(list, projectKey), at: Date.now() }); },
+      () => {},
+    ).finally(() => { this.othersAsked.delete(key); this.touch(cx); });
+  }
+
+  /** How many other plans the shown plan's worktree has. */
+  othersCount() {
+    const p = this.doc?.pointer;
+    return (p?.cwd && this.others.get(`${p.cwd}\n${p.projectKey}`)?.n) || 0;
+  }
+
+  openPlansPage(cx) {
+    const d = this.doc;
+    if (d?.api) cx.open_url(plansPageUrl(d.api.base, d.pointer));
   }
 
   /** A load that failed outside ensureDoc's own catch: the plan says why, with "Try again". */
@@ -1914,6 +1951,9 @@ export default class PlanReview extends View {
     return h_flex().id("topbar").w_full().h(46).flex_none().px(12).gap(6).items_center().border_b(1).border_color(t.border).bg(t.background)
       .child(this.button("toggle-sidebar", null, () => { this.sidebar = !this.sidebarOn(); }, c, { icon: "sidebar", iconSize: 15, px: 6, h: 28, tip: "Toggle page tree" }))
       .child(h_flex().flex_1().min_w(0).overflow_hidden().gap(6).items_center().text_size(13)
+        .when(!this.sidebarOn() && crumbs.length > 0 && !!this.doc?.pointer.title, (x) => x
+          .child(div().flex_shrink(1).min_w(40).max_w(180).truncate().text_color(t.dim).tooltip("The plan").child(this.doc.pointer.title))
+          .child(svg(ICON("chevron-right")).size(12).flex_none().text_color(t.dim)))
         .when(crumbs.length > 1, (x) => x.child(div().flex_none().text_color(t.dim).child("…")).child(svg(ICON("chevron-right")).size(12).flex_none().text_color(t.dim)))
         .when(crumbs.length > 0, (x) => x
           .child(div().id("crumb-parent").flex_shrink(1).min_w(40).max_w(220).truncate().text_color(t.dim).cursor_pointer().hover((st) => st.text_color(t.foreground))
@@ -1922,6 +1962,9 @@ export default class PlanReview extends View {
           .child(svg(ICON("chevron-right")).size(12).flex_none().text_color(t.dim)))
         .child(div().flex_shrink(1).min_w(0).truncate().font_weight(600).text_color(t.foreground).child(pg.title)))
       .when(!!this.agentChip(c, compact), (x) => x.child(this.agentChip(c, compact)))
+      // Other agents' plans in this worktree live in their own panes; this opens the list in the browser.
+      .when(this.othersCount() > 0, (x) => x.child(this.button("other-plans", otherPlansLabel(this.othersCount(), compact), (_e, cx) => this.openPlansPage(cx), c,
+        { icon: "folder", h: 24, px: compact ? 6 : 8, size: 11.5, tip: otherPlansTip(this.othersCount()) })))
       // The sidebar holds the version selector; with it hidden, a small one stays here.
       .when(this.versions().length > 1 && !this.sidebarOn(), (x) => x.child(this.versionSelect(c, false)))
       .when(this.versions().length > 1, (x) => x.child(this.diffToggle(c, compact)))

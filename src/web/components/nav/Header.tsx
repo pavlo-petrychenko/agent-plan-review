@@ -1,18 +1,21 @@
 import type { ProjectSummary } from '../../../shared/types.js';
 import { useTheme } from '../../state/theme.js';
-import { Pill, Select } from '../primitives.js';
+import { Pill } from '../primitives.js';
+import { ProjectPicker } from './ProjectPicker.js';
 import { IconGist, IconMoon, IconSettings, IconSun } from '../icons.js';
 
 export interface HeaderProps {
   projects: ProjectSummary[] | undefined;
   activeProject: string | null;
   onProjectChange: (key: string) => void;
+  /** Open the project picker on first render (`?picker=1`). */
+  pickerOpen?: boolean;
   gistBinding: { savedVersion: number; htmlUrl: string } | null | undefined;
   onOpenGist: () => void;
   onOpenManage: () => void;
 }
 
-export function Header({ projects, activeProject, onProjectChange, gistBinding, onOpenGist, onOpenManage }: HeaderProps) {
+export function Header({ projects, activeProject, onProjectChange, pickerOpen, gistBinding, onOpenGist, onOpenManage }: HeaderProps) {
   const { theme, toggle } = useTheme();
   const active = projects?.find((p) => p.key === activeProject);
 
@@ -30,19 +33,12 @@ export function Header({ projects, activeProject, onProjectChange, gistBinding, 
 
       {/* project switcher */}
       <div className="flex min-w-0 flex-1 items-center gap-2 sm:flex-none">
-        <Select
-          value={activeProject ?? ''}
-          onChange={(e) => onProjectChange(e.target.value)}
-          aria-label="Project"
-          className="w-full min-w-0 max-w-[16rem] font-medium"
-        >
-          {(projects ?? []).map((p) => (
-            <option key={p.key} value={p.key}>
-              {p.name}
-            </option>
-          ))}
-          {!projects && <option>Loading…</option>}
-        </Select>
+        <ProjectPicker
+          projects={projects}
+          activeProject={activeProject}
+          onChange={onProjectChange}
+          defaultOpen={pickerOpen}
+        />
         {active != null && active.pending > 0 && <Pill tone="pending">{active.pending} pending</Pill>}
       </div>
 

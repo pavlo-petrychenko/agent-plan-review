@@ -15,13 +15,14 @@ import type { Server } from 'node:http';
 import { createApiRouter } from './router.js';
 import { errorHandler } from './helpers.js';
 import { PlanReviewStore } from '../store/store.js';
-import type { Comment, Review } from '../../shared/types.js';
+import type { Comment, MoveVersionsResponse, ProjectSummary, Review } from '../../shared/types.js';
 
 let server: Server;
 let base: string;
 let store: PlanReviewStore;
 
 before(async () => {
+  process.env.AGENT_PLAN_REVIEW_NO_OPEN = '1'; // POST /plans must not pop a browser
   process.env.HERDR_APP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'apr-router-herdr-'));
   store = new PlanReviewStore({ home: fs.mkdtempSync(path.join(os.tmpdir(), 'apr-router-')), port: 4999 });
   const app = express();
@@ -150,4 +151,51 @@ test('a malformed comment range is a 400', async () => {
     });
     assert.equal(res.status, 400, JSON.stringify(range));
   }
+});
+
+const postJson = (url: string, body: unknown) =>
+  fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+test('POST /plans routes by agentId/planId/newPlan; GET /projects?cwd= lists one worktree with its terminals', async () => {
+  const cwd = project();
+  const plan = (markdown: string, extra: object) => postJson(`${base}/plans`, { cwd, markdown, ...extra });
+  const a = (await (await plan('# Alpha\n', { agentId: 'claude:a', agent: { terminal: 'tA' } })).json()) as { projectKey: string };
+  const b = (await (await plan('# Beta\n', { agentId: 'claude:b' })).json()) as { projectKey: string };
+  const c = (await (await plan('# Gamma\n', { agentId: 'claude:a', newPlan: true })).json()) as { projectKey: string };
+  const back = (await (await plan('# Alpha 2\n', { planId: a.projectKey })).json()) as { projectKey: string; version: number };
+  assert.equal(new Set([a.projectKey, b.projectKey, c.projectKey]).size, 3);
+  assert.equal(back.projectKey, a.projectKey);
+  assert.equal(back.version, 2);
+  // a second worktree with a plan of its own
+  await store.recordPlan({ cwd: project(), origin: 'mcp', markdown: '# Elsewhere\n', agentId: 'claude:z' });
+
+  const listed = (await (await fetch(`${base}/projects?cwd=${encodeURIComponent(cwd)}`)).json()) as ProjectSummary[];
+  assert.deepEqual(listed.map((p) => p.key).sort(), [a.projectKey, b.projectKey, c.projectKey].sort());
+  assert.equal(listed.find((p) => p.key === a.projectKey)?.lastTerminal, 'tA');
+  assert.equal(listed.find((p) => p.key === b.projectKey)?.lastTerminal, undefined);
+  const everything = (await (await fetch(`${base}/projects`)).json()) as ProjectSummary[];
+  assert.ok(everything.length > listed.length);
+
+  const nothing = (await (await fetch(`${base}/projects?cwd=${encodeURIComponent(project())}`)).json()) as ProjectSummary[];
+  assert.deepEqual(nothing, []);
+});
+
+test('POST /projects/:key/move with to "new-plan" moves the versions into a new plan of the worktree', async () => {
+  const cwd = project();
+  const one = await store.recordPlan({ cwd, origin: 'api', markdown: '# First\n\none' });
+  await store.recordPlan({ cwd, origin: 'api', markdown: '# Second\n\ntwo' });
+
+  const res = await postJson(`${base}/projects/${encodeURIComponent(one.projectKey)}/move`, { to: 'new-plan', versions: [2] });
+  assert.equal(res.status, 200);
+  const moved = (await res.json()) as MoveVersionsResponse;
+  assert.match(moved.to, /\.p-[0-9a-f]{6}$/);
+  assert.deepEqual(moved.moved, [{ from: 2, to: 1 }]);
+  assert.equal(moved.sourceRemoved, false);
+
+  const listed = (await (await fetch(`${base}/projects?cwd=${encodeURIComponent(cwd)}`)).json()) as ProjectSummary[];
+  assert.equal(listed.length, 2);
+  assert.equal(listed.find((p) => p.key === moved.to)?.plan?.title, 'Second');
+
+  const missing = await postJson(`${base}/projects/nope/move`, { to: 'new-plan' });
+  assert.equal(missing.status, 404);
 });

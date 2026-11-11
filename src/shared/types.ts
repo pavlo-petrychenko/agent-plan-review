@@ -203,6 +203,11 @@ export interface ChannelInfo {
 export interface ProjectSummary extends ProjectMeta {
   pending: number;
   versionCount: number;
+  /**
+   * Herdr terminal of the project's newest review that has one (`t5d`), when
+   * known. Lets the project picker say which terminal a plan belongs to.
+   */
+  lastTerminal?: string;
 }
 
 export interface ProjectDetail {
@@ -283,6 +288,12 @@ export interface DiffResponse {
   /** Every document of the union, in new-side order then removed docs. */
   docs: DiffDocEntry[];
 }
+
+/**
+ * Pseudo project key for a move: "a new plan in the source's worktree". Real
+ * keys end in an 8-hex path hash (see keys.ts), so it can never clash with one.
+ */
+export const NEW_PLAN_TARGET = 'new-plan';
 
 export interface MoveVersionsResponse {
   /** Target project key. */

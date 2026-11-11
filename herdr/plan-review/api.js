@@ -51,6 +51,8 @@ export function createApi(base, fetchFn = globalThis.fetch) {
     base: root,
     health: () => get("/api/health"),
     review: (id) => get(`/api/reviews/${enc(id)}`),
+    /** The projects of one worktree (its plans and its old worktree-wide project), newest first. */
+    projectsIn: (cwd) => get(`/api/projects?cwd=${enc(cwd)}`).then((r) => (Array.isArray(r) ? r : [])),
     /** The project: { meta, versions: [{ n, createdAt, kind, docCount }] }. */
     project: (key) => get(`/api/projects/${enc(key)}`),
     /** Every review of the project (any status), as the web UI lists them. */

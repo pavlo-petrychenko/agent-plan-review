@@ -14,15 +14,18 @@ import type {
   ProjectSummary,
   Review,
   ReviewMessagesPayload,
+  VersionInfo,
   VersionPayload,
 } from '../../shared/types.js';
+import { NEW_PLAN_TARGET } from '../../shared/types.js';
 import { loadConfig, type ServerConfig } from '../config.js';
 import { createLayout, type Layout } from './paths.js';
 import { CommentStore } from './comments.js';
 import { ProjectStore } from './projects.js';
 import { ReviewStore, FORCE_REJECT_REASON, type ReviewFilter } from './reviews.js';
 import { VersionStore } from './versions.js';
-import { recordPlan, type RecordInput, type RecordOutput } from './record.js';
+import { extractRootTitle, recordPlan, type RecordInput, type RecordOutput } from './record.js';
+import { newPlanId, planProjectKey, sanitizeProjectKey } from '../../shared/keys.js';
 import { compileApproval, compileRejection } from '../../shared/compile.js';
 import { actionableComments } from '../../shared/compile.js';
 import { commentDelivery, groupThreads, latestCreatedAt } from '../../shared/threads.js';
@@ -91,13 +94,30 @@ export class PlanReviewStore {
   // Reads
   // -------------------------------------------------------------------------
 
-  async listProjects(): Promise<ProjectSummary[]> {
-    const metas = await this.projects.list();
+  /**
+   * Every project, most recently active first; with `cwd`, only the projects of
+   * that worktree (its plans and its legacy project). One scan of the reviews
+   * feeds both the pending count and the last Herdr terminal of every project.
+   */
+  async listProjects(cwd?: string): Promise<ProjectSummary[]> {
+    const metas = cwd ? await this.projects.listByWorktree(cwd) : await this.projects.list();
+    const pending = new Map<string, number>();
+    const terminal = new Map<string, string>();
+    // newest first: the first review with a terminal is the project's last one
+    for (const review of await this.reviews.list()) {
+      if (review.status === 'pending') pending.set(review.projectKey, (pending.get(review.projectKey) ?? 0) + 1);
+      if (review.agent?.terminal && !terminal.has(review.projectKey)) terminal.set(review.projectKey, review.agent.terminal);
+    }
     const summaries: ProjectSummary[] = [];
     for (const meta of metas) {
       const versions = await this.versions.listMetas(meta.key);
-      const pending = await this.reviews.pendingCount(meta.key);
-      summaries.push({ ...meta, pending, versionCount: versions.length });
+      const lastTerminal = terminal.get(meta.key);
+      summaries.push({
+        ...meta,
+        pending: pending.get(meta.key) ?? 0,
+        versionCount: versions.length,
+        ...(lastTerminal ? { lastTerminal } : {}),
+      });
     }
     return summaries;
   }
@@ -551,18 +571,38 @@ export class PlanReviewStore {
    * Move versions (all of them by default) into another project, renumbering
    * them onto the target's sequence. Comments travel with their version and
    * reviews are re-pointed, so a pending decision still resolves correctly.
-   * Used to repair plans that were recorded under a stray project key.
+   * Used to repair plans that were recorded under a stray project key, and to
+   * split a worktree project that mixes several agents' plans.
+   *
+   * `toKey` may be `NEW_PLAN_TARGET`: the versions then go to a new plan of the
+   * source's worktree, titled like the first moved version's root page. The new
+   * plan lists the agents that submitted the moved reviews, so their next
+   * submission continues it.
    */
   async moveVersions(fromKey: string, toKey: string, ns?: number[]): Promise<MoveVersionsResponse> {
     if (fromKey === toKey) throw badRequest('Source and target projects are the same');
     const fromMeta = await this.projects.get(fromKey);
     if (!fromMeta) throw notFound('Project');
-    const toMeta = await this.projects.get(toKey);
-    if (!toMeta) throw notFound('Target project');
+    const toExisting = toKey === NEW_PLAN_TARGET ? null : await this.projects.get(toKey);
+    if (toKey !== NEW_PLAN_TARGET && !toExisting) throw notFound('Target project');
 
     const available = await this.versions.listMetas(fromKey);
     const selected = ns && ns.length > 0 ? available.filter((v) => ns.includes(v.n)) : available;
     if (selected.length === 0) throw badRequest('No versions to move');
+
+    let toMeta: ProjectMeta;
+    if (toExisting) {
+      toMeta = toExisting;
+    } else {
+      const worktreeKey = sanitizeProjectKey(fromMeta.cwd);
+      let id = newPlanId();
+      while (await this.projects.get(planProjectKey(worktreeKey, id))) id = newPlanId();
+      toMeta = await this.projects.createPlan(planProjectKey(worktreeKey, id), fromMeta.cwd, {
+        id,
+        title: await this.rootTitleOf(fromKey, selected[0]),
+      });
+      toKey = toMeta.key;
+    }
 
     let next = await this.versions.maxSurvivor(toKey);
     const moved: { from: number; to: number }[] = [];
@@ -588,16 +628,38 @@ export class PlanReviewStore {
         docBodies,
       });
       await this.comments.move(fromKey, version.n, toKey, next);
-      for (const review of await this.reviews.list({ projectKey: fromKey, version: version.n })) {
+      // oldest first, so the newest agent ends up last in `agents`
+      for (const review of (await this.reviews.list({ projectKey: fromKey, version: version.n })).reverse()) {
         await this.reviews.update(review.id, { projectKey: toKey, version: next });
+        if (!toExisting && review.agentId) {
+          toMeta.agents = [...(toMeta.agents ?? []).filter((a) => a !== review.agentId), review.agentId];
+        }
       }
       await this.versions.deleteFiles(fromKey, version.n);
       moved.push({ from: version.n, to: next });
     }
 
+    if (!toExisting && toMeta.agents?.length && fromMeta.agents?.length) {
+      // The split hands those agents to the new plan; the source keeps one only while a
+      // review of theirs is left in it, or the agent's next plan could still land back there.
+      const left = new Set((await this.reviews.list({ projectKey: fromKey })).map((r) => r.agentId));
+      fromMeta.agents = fromMeta.agents.filter((a) => !toMeta.agents!.includes(a) || left.has(a));
+    }
     const sourceRemoved = await this.recomputeAfterDeletion(fromMeta);
     await this.recomputeAfterDeletion(toMeta);
+    // Herdr pointers name a review's project and version: re-point them.
+    for (const m of moved) await this.syncHerdr({ projectKey: toKey, version: m.to });
     return { to: toKey, moved, sourceRemoved };
+  }
+
+  /** Root page title of a version: the manifest's root doc, else the first `# ` heading. */
+  private async rootTitleOf(key: string, version: VersionInfo): Promise<string> {
+    if (version.kind === 'tree') {
+      const manifest = await this.versions.readManifest(key, version.n);
+      const root = manifest?.docs.find((d) => d.slug === manifest.root) ?? manifest?.docs.find((d) => !d.parent);
+      if (root?.title) return root.title;
+    }
+    return extractRootTitle((await this.versions.readMarkdown(key, version.n)) ?? '');
   }
 
   async deleteProject(key: string, force: boolean): Promise<void> {

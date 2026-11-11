@@ -30,6 +30,8 @@ export interface UrlParams {
   view: 'preview' | 'diff';
   diffFrom: number | null;
   diffMode: 'split' | 'unified';
+  /** `?picker=1`: open the project picker (links from the Herdr mod). */
+  picker: boolean;
 }
 
 export function useParams(): UrlParams {
@@ -46,6 +48,7 @@ export function useParams(): UrlParams {
       view,
       diffFrom: q.get('from') ? Number(q.get('from')) : null,
       diffMode,
+      picker: q.get('picker') === '1',
     };
   }, [search]);
 }
