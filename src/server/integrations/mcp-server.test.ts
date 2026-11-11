@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { PlanReviewStore } from '../store/store.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 
@@ -434,7 +435,7 @@ test('wait_seconds zero still checks for an Ask already posted', async () => {
   }
 });
 
-test('review lookup without reviewId never falls back to another agent\'s review', async () => {
+test("review lookup without reviewId never falls back to another agent's review", async () => {
   const driver = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-a' });
   const other = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-b' });
   try {
@@ -715,6 +716,324 @@ test('plan_review_submit writes the Herdr pointer when the integration is enable
     assert.equal(pointer.reviewId, reviewId);
     assert.equal(pointer.status, 'pending');
     assert.equal(pointer.title, 'Test Plan');
+  } finally {
+    driver.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Sharing plans: plan_review_list / _get / _join, and planId / newPlan on submit
+// ---------------------------------------------------------------------------
+
+const newCwd = (): string => fs.mkdtempSync(path.join(os.tmpdir(), 'apr-proj-'));
+
+/** The JSON object a tool prints before its guidance text. */
+function head<T = Record<string, unknown>>(text: string): T {
+  return JSON.parse(text.split('\n\n')[0]) as T;
+}
+
+interface Submitted {
+  reviewId: string;
+  projectKey: string;
+  version: number;
+}
+
+const submitTo = async (
+  driver: McpDriver,
+  cwd: string,
+  markdown: string,
+  extra: Record<string, unknown> = {},
+): Promise<Submitted> => {
+  const text = await driver.callTool('plan_review_submit', { cwd, markdown, ...extra });
+  assert.match(text, /"reviewId"/, `submit should succeed, got: ${text}`);
+  return head<Submitted>(text.replace(/^WARNING.*\n\n/s, ''));
+};
+
+/** A store on the drivers' home, to set up or inspect what the MCP processes wrote. */
+const storeAt = (h: string): PlanReviewStore => new PlanReviewStore({ home: h, port: TEST_PORT });
+
+interface ListedPlan {
+  planId: string;
+  worktreePlan: boolean;
+  title: string;
+  currentVersion: number;
+  status: string;
+  mine: boolean;
+  lastAgentTerminal?: string;
+}
+
+test("plan_review_list shows both agents' plans and the legacy one, newest first, with mine and status", async () => {
+  const a = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-a', HC_TERMINAL_ID: 'tA' });
+  const b = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-b' });
+  try {
+    const cwd = newCwd();
+    const legacy = await storeAt(home).recordPlan({ cwd, origin: 'mcp', markdown: '# Old shared\n\nold' });
+    const planA = await submitTo(a, cwd, '# Plan A\n\nalpha');
+    const planB = await submitTo(b, cwd, '# Plan B\n\nbeta');
+    decideReview(home, planA.reviewId, 'approved');
+
+    const text = await b.callTool('plan_review_list', { cwd });
+    const { plans } = head<{ plans: ListedPlan[] }>(text);
+    assert.deepEqual(
+      plans.map((p) => p.title),
+      ['Plan B', 'Plan A', 'Old shared'],
+    );
+    const [pb, pa, old] = plans;
+    assert.deepEqual([pb.mine, pa.mine, old.mine], [true, false, false]);
+    assert.deepEqual([pb.status, pa.status, old.status], ['pending', 'approved', 'pending']);
+    assert.equal(pa.lastAgentTerminal, 'tA');
+    assert.equal(pb.lastAgentTerminal, undefined);
+    assert.equal(pb.planId, planB.projectKey.split('.').pop());
+    assert.equal(old.planId, legacy.projectKey);
+    assert.equal(old.worktreePlan, true);
+    assert.equal(pa.worktreePlan, false);
+    assert.match(text, /plan_review_join/, 'one line of guidance follows the JSON');
+
+    // From A's seat the flags flip.
+    const asA = head<{ plans: ListedPlan[] }>(await a.callTool('plan_review_list', { cwd })).plans;
+    assert.deepEqual(
+      asA.map((p) => p.mine),
+      [false, true, false],
+    );
+  } finally {
+    b.close();
+    a.close();
+  }
+});
+
+test('plan_review_list defaults to the MCP server cwd and reports an empty worktree', async () => {
+  const driver = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-a' });
+  try {
+    const empty = await driver.callTool('plan_review_list', { cwd: newCwd() });
+    assert.deepEqual(head(empty), { plans: [] });
+    // No cwd: the server's own cwd (REPO_ROOT here), which has no plans in this fresh home.
+    assert.deepEqual(head(await driver.callTool('plan_review_list', {})), { plans: [] });
+  } finally {
+    driver.close();
+  }
+});
+
+test('plan_review_get returns the markdown and only open threads, and does not change agents', async () => {
+  const a = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-a' });
+  const b = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-b' });
+  try {
+    const cwd = newCwd();
+    const planA = await submitTo(a, cwd, '# Plan A\n\nline one\nline two');
+    const store = storeAt(home);
+    const open = await store.addComment(planA.projectKey, 1, { body: 'still open', doc: 'root', line: 3 });
+    const closed = await store.addComment(planA.projectKey, 1, {
+      body: 'already done',
+      doc: 'root',
+      line: 4,
+    });
+    await store.addAgentReply(planA.projectKey, 1, open.id, 'my answer');
+    await store.resolveComment(planA.projectKey, 1, closed.id, true);
+    const planId = planA.projectKey.split('.').pop()!;
+    const metaFile = path.join(home, 'projects', planA.projectKey, 'meta.json');
+    const before = fs.readFileSync(metaFile, 'utf8');
+
+    const text = await b.callTool('plan_review_get', { planId, cwd });
+    const got = head<{
+      planId: string;
+      title: string;
+      version: number;
+      openThreads: {
+        threadId: string;
+        doc: string;
+        line: number;
+        quote: unknown;
+        body: string;
+        author: string;
+        replies: { author: string; body: string }[];
+      }[];
+    }>(text);
+    assert.equal(got.planId, planId);
+    assert.equal(got.title, 'Plan A');
+    assert.equal(got.version, 1);
+    assert.equal(got.openThreads.length, 1);
+    assert.equal(got.openThreads[0].threadId, open.id);
+    assert.equal(got.openThreads[0].body, 'still open');
+    assert.equal(got.openThreads[0].author, 'me');
+    assert.equal(got.openThreads[0].doc, 'root');
+    assert.equal(got.openThreads[0].line, 3);
+    assert.deepEqual(got.openThreads[0].replies, [{ author: 'agent', body: 'my answer' }]);
+    assert.doesNotMatch(text, /already done/);
+    assert.match(text, /# Plan A\n\nline one\nline two/);
+    assert.equal(fs.readFileSync(metaFile, 'utf8'), before, 'get is read only: agents and updatedAt stay');
+    assert.deepEqual(JSON.parse(before).agents, ['claude:sess-a']);
+  } finally {
+    b.close();
+    a.close();
+  }
+});
+
+test('plan_review_get of a tree plan prints pages with doc markers; version selects an older one', async () => {
+  const driver = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-a' });
+  try {
+    const cwd = newCwd();
+    const tree =
+      '# Root plan\n\nintro\n\n<!--doc slug=impl title="Implementation" parent=root-->\nimpl body\n';
+    const v1 = await submitTo(driver, cwd, tree);
+    await submitTo(driver, cwd, '# Root plan\n\nsingle now');
+    const planId = v1.projectKey.split('.').pop()!;
+
+    const text = await driver.callTool('plan_review_get', { planId, version: 1, cwd });
+    assert.match(
+      text.replace(/.*--- plan markdown ---\n/s, ''),
+      /^# Root plan\n\nintro\n\n<!--doc slug=impl title="Implementation" parent=root-->\nimpl body/,
+    );
+    assert.doesNotMatch(text, /single now/);
+    assert.match(await driver.callTool('plan_review_get', { planId, cwd }), /single now/);
+  } finally {
+    driver.close();
+  }
+});
+
+test('plan_review_get and plan_review_join fail clearly on unknown, foreign or missing plan ids', async () => {
+  const driver = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-a' });
+  try {
+    const cwd = newCwd();
+    const mine = await submitTo(driver, cwd, '# Mine\n\nx');
+    const foreign = await submitTo(driver, newCwd(), '# Elsewhere\n\ny');
+    const metaFile = path.join(home, 'projects', foreign.projectKey, 'meta.json');
+    const before = fs.readFileSync(metaFile, 'utf8');
+
+    for (const tool of ['plan_review_get', 'plan_review_join']) {
+      const unknown = await driver.request('tools/call', {
+        name: tool,
+        arguments: { planId: 'p-abcdef', cwd },
+      });
+      const result = unknown.result as { isError?: boolean; content: { text: string }[] };
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /Unknown plan "p-abcdef"/);
+      assert.ok(
+        result.content[0].text.includes(mine.projectKey.split('.').pop()!),
+        "lists the worktree's plans",
+      );
+
+      assert.match(
+        await driver.callTool(tool, { planId: foreign.projectKey, cwd }),
+        /belongs to another worktree/,
+      );
+      assert.match(await driver.callTool(tool, { cwd }), /planId is required/);
+    }
+    assert.equal(fs.readFileSync(metaFile, 'utf8'), before, 'a refused join writes nothing');
+  } finally {
+    driver.close();
+  }
+});
+
+test("plan_review_join then submit without planId lands in the joined plan, not the agent's newer own plan", async () => {
+  const a = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-a' });
+  const b = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-b' });
+  try {
+    const cwd = newCwd();
+    const planA = await submitTo(a, cwd, '# Plan A\n\nalpha');
+    const planB = await submitTo(b, cwd, '# Plan B\n\nbeta');
+    const planId = planA.projectKey.split('.').pop()!;
+
+    const joined = await b.callTool('plan_review_join', { planId, cwd });
+    const info = head<{ joined: boolean; planId: string; title: string; currentVersion: number }>(joined);
+    assert.deepEqual(info, { joined: true, planId, title: 'Plan A', currentVersion: 1 });
+    const metaA = JSON.parse(
+      fs.readFileSync(path.join(home, 'projects', planA.projectKey, 'meta.json'), 'utf8'),
+    );
+    assert.deepEqual(metaA.agents, ['claude:sess-a', 'claude:sess-b']);
+    assert.equal(metaA.currentVersion, 1, 'join does not create a version');
+
+    const next = await submitTo(b, cwd, '# Plan A\n\nalpha, revised by B');
+    assert.equal(next.projectKey, planA.projectKey);
+    assert.equal(next.version, 2);
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(home, 'projects', planB.projectKey, 'meta.json'), 'utf8'))
+        .currentVersion,
+      1,
+    );
+  } finally {
+    b.close();
+    a.close();
+  }
+});
+
+test('plan_review_join via MCP, then an ExitPlanMode hook submit of the same session lands in the joined plan', async () => {
+  const a = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-a' });
+  const b = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-b' });
+  try {
+    const cwd = newCwd();
+    const planA = await submitTo(a, cwd, '# Plan A\n\nalpha');
+    const planB = await submitTo(b, cwd, '# Plan B\n\nbeta');
+    await b.callTool('plan_review_join', { planId: planA.projectKey.split('.').pop()!, cwd });
+
+    // What the hook sends: session_id → agentId claude:<session>, origin 'hook'.
+    const viaHook = await storeAt(home).recordPlan({
+      cwd,
+      origin: 'hook',
+      sessionId: 'sess-b',
+      agentId: 'claude:sess-b',
+      toolUseId: 'toolu_1',
+      markdown: '# Plan A\n\nfrom ExitPlanMode',
+    });
+    assert.equal(viaHook.projectKey, planA.projectKey);
+    assert.equal(viaHook.version, 2);
+    assert.notEqual(viaHook.projectKey, planB.projectKey);
+  } finally {
+    b.close();
+    a.close();
+  }
+});
+
+test('plan_review_submit with planId writes to that plan; a foreign planId is refused; newPlan starts a fresh one', async () => {
+  const a = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-a' });
+  const b = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-b' });
+  try {
+    const cwd = newCwd();
+    const planA = await submitTo(a, cwd, '# Plan A\n\nalpha');
+    const planB = await submitTo(b, cwd, '# Plan B\n\nbeta');
+    const idA = planA.projectKey.split('.').pop()!;
+
+    // planId: next version of A's plan, written by B; B's own plan is untouched.
+    const viaId = await submitTo(b, cwd, '# Plan A\n\nalpha plus B', { planId: idA });
+    assert.equal(viaId.projectKey, planA.projectKey);
+    assert.equal(viaId.version, 2);
+
+    // Not in this worktree: nothing is recorded, and the worktree's plans are listed.
+    const foreign = await submitTo(a, newCwd(), '# Elsewhere\n\nz');
+    const refused = await b.callTool('plan_review_submit', {
+      cwd,
+      markdown: '# X\n\nx',
+      planId: foreign.projectKey,
+    });
+    assert.match(refused, /NOT recorded/);
+    assert.match(refused, /belongs to another worktree/);
+
+    // newPlan: B has plans already, still gets a third one.
+    const fresh = await submitTo(b, cwd, '# Plan B again\n\nnew', { newPlan: true });
+    assert.notEqual(fresh.projectKey, planA.projectKey);
+    assert.notEqual(fresh.projectKey, planB.projectKey);
+    assert.equal(fresh.version, 1);
+    const plans = head<{ plans: ListedPlan[] }>(await b.callTool('plan_review_list', { cwd })).plans;
+    assert.equal(plans.length, 3);
+  } finally {
+    b.close();
+    a.close();
+  }
+});
+
+test('the plan tools are listed with their required arguments', async () => {
+  const driver = new McpDriver(home);
+  try {
+    const res = await driver.request('tools/list', {});
+    const tools = (
+      res.result as {
+        tools: { name: string; inputSchema: { required?: string[]; properties: Record<string, unknown> } }[];
+      }
+    ).tools;
+    const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+    assert.deepEqual(byName.plan_review_get.inputSchema.required, ['planId']);
+    assert.deepEqual(byName.plan_review_join.inputSchema.required, ['planId']);
+    assert.ok('cwd' in byName.plan_review_list.inputSchema.properties);
+    assert.ok('planId' in byName.plan_review_submit.inputSchema.properties);
+    assert.ok('newPlan' in byName.plan_review_submit.inputSchema.properties);
   } finally {
     driver.close();
   }

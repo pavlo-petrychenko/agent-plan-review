@@ -132,6 +132,13 @@ export interface ProjectMeta {
   plan?: { id: string; title: string };
   /** Agent ids that wrote to or joined this project, newest last, no repeats. */
   agents?: string[];
+  /**
+   * Per agent id: when that agent last wrote to or joined this project. Routing
+   * ranks an agent's plans by this (falling back to `updatedAt`), so a join
+   * wins over a newer plan the agent owns, and another agent's edit to a shared
+   * plan does not pull the agent back to it.
+   */
+  activeAt?: Record<string, string>;
 }
 
 export interface Review {

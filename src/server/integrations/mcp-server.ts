@@ -70,7 +70,9 @@ const TOOLS = [
     description:
       'Submit an implementation plan for human review. The plan opens in a browser review UI; ' +
       'call plan_review_check afterwards to wait for the decision. Provide exactly one of: ' +
-      'docs[] (multi-document), markdown (single document), or plan (raw string with optional <!--doc ...--> markers).',
+      'docs[] (multi-document), markdown (single document), or plan (raw string with optional <!--doc ...--> markers). ' +
+      'Each agent has its own plan per worktree, so a re-submit is the next version of YOUR plan; ' +
+      'planId continues another plan, newPlan:true starts a fresh one.',
     inputSchema: {
       type: 'object',
       required: ['cwd'],
@@ -81,6 +83,17 @@ const TOOLS = [
             'Absolute path of the repo/worktree ROOT the plan belongs to (its git toplevel). Subdirectories are folded into the containing project automatically.',
         },
         name: { type: 'string', description: 'Optional display name for the project.' },
+        planId: {
+          type: 'string',
+          description:
+            'Write to this plan (p-xxxxxx from plan_review_list) as its next version, instead of your own plan. ' +
+            'Must be a plan of the same worktree. Omit to continue your own plan.',
+        },
+        newPlan: {
+          type: 'boolean',
+          description:
+            'true starts a fresh plan in this worktree even if you already have one. Omit to continue your own plan.',
+        },
         markdown: { type: 'string', description: 'Single-document plan markdown.' },
         plan: { type: 'string', description: 'Raw plan string (markers allowed); treated like markdown.' },
         docs: {
@@ -116,6 +129,61 @@ const TOOLS = [
             },
           },
         },
+      },
+    },
+  },
+  {
+    name: 'plan_review_list',
+    description:
+      "List the plans in this worktree: each agent has its own, and other agents' plans may exist. " +
+      'Per plan: planId, title, currentVersion, status of the newest review (pending / approved / rejected / none), ' +
+      'updatedAt and mine (you wrote to or joined it). Newest first. Read only — you are never required to use ' +
+      "another agent's plan.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cwd: {
+          type: 'string',
+          description: 'Repo/worktree root. Defaults to the MCP server cwd.',
+        },
+      },
+    },
+  },
+  {
+    name: 'plan_review_get',
+    description:
+      'Read one plan of this worktree: its markdown (a multi-document plan comes back as pages with ' +
+      '<!--doc ...--> markers, ready to re-submit) and its OPEN comment threads. Read only: it does not ' +
+      'change the plan and does not make you part of it. Use plan_review_join or planId on submit to continue it.',
+    inputSchema: {
+      type: 'object',
+      required: ['planId'],
+      properties: {
+        planId: {
+          type: 'string',
+          description: 'Plan id from plan_review_list (p-xxxxxx, or the full key of a worktree plan).',
+        },
+        version: { type: 'number', description: 'Version to read; default the current one.' },
+        cwd: { type: 'string', description: 'Repo/worktree root. Defaults to the MCP server cwd.' },
+      },
+    },
+  },
+  {
+    name: 'plan_review_join',
+    description:
+      'Continue another plan of this worktree as your own: your next submit without planId (also the ' +
+      'ExitPlanMode hook in Claude Code) becomes the next version of that plan. Call it BEFORE ExitPlanMode. ' +
+      'Changes nothing else — no new version, no review. To submit once to a plan without joining, pass ' +
+      'planId to plan_review_submit.',
+    inputSchema: {
+      type: 'object',
+      required: ['planId'],
+      properties: {
+        planId: {
+          type: 'string',
+          description: 'Plan id from plan_review_list (p-xxxxxx, or the full key of a worktree plan).',
+        },
+        cwd: { type: 'string', description: 'Repo/worktree root. Defaults to the MCP server cwd.' },
       },
     },
   },
@@ -284,6 +352,9 @@ export async function runMcpServer(): Promise<void> {
     if (name === 'plan_review_check') return check(store, args, meta);
     if (name === 'plan_review_reply') return reply(store, args);
     if (name === 'plan_review_resolve') return resolveThread(store, args);
+    if (name === 'plan_review_list') return listPlans(store, args);
+    if (name === 'plan_review_get') return getPlan(store, args);
+    if (name === 'plan_review_join') return joinPlan(store, args);
     if (name === 'plan_review_attach_image') return attachImage(store, args);
     return toolError(`Unknown tool: ${name}`);
   }
@@ -319,6 +390,8 @@ export async function runMcpServer(): Promise<void> {
       const result = await store.recordPlan({
         cwd,
         name: typeof args.name === 'string' ? args.name : undefined,
+        planId: typeof args.planId === 'string' && args.planId.trim() ? args.planId : undefined,
+        newPlan: args.newPlan === true ? true : undefined,
         origin: 'mcp',
         agent,
         agentId: myAgentId(),
@@ -355,6 +428,83 @@ export async function runMcpServer(): Promise<void> {
         );
       }
       if (err instanceof ApiError) return toolText(`The plan was NOT recorded: ${err.message}`);
+      throw err;
+    }
+  }
+
+  /** The worktree a plan tool looks at: the given cwd, else this server's own. */
+  function planCwd(args: Record<string, unknown>): string {
+    return typeof args.cwd === 'string' && args.cwd.trim() ? args.cwd.trim() : process.cwd();
+  }
+
+  function planIdArg(args: Record<string, unknown>): string {
+    return typeof args.planId === 'string' ? args.planId.trim() : '';
+  }
+
+  async function listPlans(store: PlanReviewStore, args: Record<string, unknown>) {
+    const plans = await store.listPlans(planCwd(args), myAgentId());
+    if (plans.length === 0) {
+      return toolText(
+        JSON.stringify({ plans: [] }, null, 2) +
+          '\n\nThis worktree has no plans yet. Submit yours with plan_review_submit.',
+      );
+    }
+    return toolText(
+      JSON.stringify({ plans }, null, 2) +
+        '\n\nRead one with plan_review_get { "planId": "<planId>" }. To continue another plan, call ' +
+        'plan_review_join { "planId" } (then submit or ExitPlanMode as usual) or pass planId to plan_review_submit. ' +
+        'You do not have to use these plans; plan_review_submit with newPlan:true starts a fresh one. ' +
+        'A planId that is a full key is the worktree plan from before plans were per agent.',
+    );
+  }
+
+  async function getPlan(store: PlanReviewStore, args: Record<string, unknown>) {
+    const planId = planIdArg(args);
+    if (!planId) return toolError('planId is required (see plan_review_list)');
+    let version: number | undefined;
+    if (args.version != null) {
+      version = Number(args.version);
+      if (!Number.isInteger(version) || version < 1) return toolError('version must be a positive integer');
+    }
+    try {
+      const plan = await store.getPlan(planCwd(args), planId, version);
+      const { markdown, openThreads, ...head } = plan;
+      return toolText(
+        JSON.stringify({ ...head, openThreads }, null, 2) +
+          '\n\n--- plan markdown ---\n' +
+          markdown +
+          '\n--- end ---\n\nRead only: nothing changed. To continue this plan, call plan_review_join { "planId": "' +
+          plan.planId +
+          '" } or pass planId to plan_review_submit.',
+      );
+    } catch (err) {
+      if (err instanceof ApiError || err instanceof PlanValidationError) return toolError(err.message);
+      throw err;
+    }
+  }
+
+  async function joinPlan(store: PlanReviewStore, args: Record<string, unknown>) {
+    const planId = planIdArg(args);
+    if (!planId) return toolError('planId is required (see plan_review_list)');
+    try {
+      const meta = await store.joinPlan(planCwd(args), planId, myAgentId());
+      const id = meta.plan?.id ?? meta.key;
+      return toolText(
+        JSON.stringify(
+          {
+            joined: true,
+            planId: id,
+            title: meta.plan?.title ?? meta.name,
+            currentVersion: meta.currentVersion,
+          },
+          null,
+          2,
+        ) +
+          '\n\nYour next plan_review_submit (or ExitPlanMode) without planId becomes the next version of this plan. ' +
+          'Nothing was submitted yet.',
+      );
+    } catch (err) {
+      if (err instanceof ApiError || err instanceof PlanValidationError) return toolError(err.message);
       throw err;
     }
   }

@@ -154,10 +154,7 @@ export async function recordPlan(
   // Fold subdirectory submissions onto their repo/worktree root (or the nearest
   // already-registered project) so one codebase stays one project. Worktrees
   // stay separate: a worktree's own toplevel IS the worktree root.
-  // Many projects (plans) share one worktree cwd, so de-duplicate. Every
-  // registered cwd is a worktree root, never a plan, so folding can only land
-  // on a worktree.
-  const cwd = resolveProjectCwd(rawCwd, [...new Set((await projects.list()).map((p) => p.cwd))]);
+  const cwd = await resolveWorktreeCwd(projects, rawCwd);
   const rootTitle = (docs.find((d) => !d.parent) ?? docs[0]).title;
   const meta = await chooseProject(projects, reviews, cwd, rootTitle, input);
   const key = meta.key;
@@ -363,21 +360,71 @@ async function chooseProject(
   } else if (agentId) {
     const inWorktree = await projects.listByWorktree(cwd);
     const legacy = inWorktree.find((p) => p.key === worktreeKey && !p.plan);
-    if (legacy && input.origin === 'hook' && input.sessionId) {
+    // Only for a session no plan knows yet: once it joined or wrote a plan, that
+    // choice (rule 4) outranks the pending legacy review.
+    const known = inWorktree.some((p) => p.agents?.includes(agentId));
+    if (legacy && !known && input.origin === 'hook' && input.sessionId) {
       const pending = await reviews.list({ status: 'pending', projectKey: legacy.key });
       if (pending.some((r) => r.origin === 'hook' && r.sessionId === input.sessionId)) meta = legacy;
     }
-    // listByWorktree is newest first, so the first hit is the most recent.
-    meta ??= inWorktree.find((p) => p.agents?.includes(agentId)) ?? (await createPlan());
+    meta ??= newestPlanOf(inWorktree, agentId) ?? (await createPlan());
   } else {
     return (await projects.getOrCreate(cwd, input.name)).meta;
   }
 
-  if (agentId && meta.agents?.at(-1) !== agentId) {
-    meta.agents = [...(meta.agents ?? []).filter((a) => a !== agentId), agentId];
-    await projects.save(meta);
-  }
+  if (agentId) await markAgentActive(projects, cwd, meta, agentId);
   return meta;
+}
+
+/** When `agentId` last wrote to or joined `p`; plans that predate `activeAt` fall back to `updatedAt`. */
+function agentRank(p: ProjectMeta, agentId: string): string {
+  return p.activeAt?.[agentId] ?? p.updatedAt;
+}
+
+/**
+ * The plan an agent continues without naming one: of the worktree's projects
+ * that list the agent, the one it was last active in (first, i.e. newest, on ties).
+ */
+function newestPlanOf(inWorktree: ProjectMeta[], agentId: string): ProjectMeta | undefined {
+  let best: ProjectMeta | undefined;
+  for (const p of inWorktree) {
+    if (!p.agents?.includes(agentId)) continue;
+    if (!best || agentRank(p, agentId) > agentRank(best, agentId)) best = p;
+  }
+  return best;
+}
+
+/**
+ * Record `agentId` on `meta`: last in `agents`, and stamped as its most recently
+ * active plan. The stamp is strictly later than the agent's other plans (a
+ * millisecond clock can tie), so "join X, then submit" lands in X. Leaves
+ * `updatedAt` alone: that is version history, not agent activity.
+ */
+export async function markAgentActive(
+  projects: ProjectStore,
+  cwd: string,
+  meta: ProjectMeta,
+  agentId: string,
+): Promise<void> {
+  let floor = meta.activeAt?.[agentId] ?? '';
+  for (const p of await projects.listByWorktree(cwd)) {
+    if (p.key !== meta.key && p.agents?.includes(agentId) && agentRank(p, agentId) > floor) {
+      floor = agentRank(p, agentId);
+    }
+  }
+  const now = new Date().toISOString();
+  const at = now > floor ? now : new Date(Date.parse(floor) + 1).toISOString();
+  meta.agents = [...(meta.agents ?? []).filter((a) => a !== agentId), agentId];
+  meta.activeAt = { ...meta.activeAt, [agentId]: at };
+  await projects.save(meta);
+}
+
+/** Fold a raw cwd onto its worktree root (see `recordPlan`). */
+export async function resolveWorktreeCwd(projects: ProjectStore, rawCwd: string): Promise<string> {
+  // Many projects (plans) share one worktree cwd, so de-duplicate. Every
+  // registered cwd is a worktree root, never a plan, so folding can only land
+  // on a worktree.
+  return resolveProjectCwd(rawCwd.trim(), [...new Set((await projects.list()).map((p) => p.cwd))]);
 }
 
 /**
@@ -385,7 +432,11 @@ async function chooseProject(
  * this worktree. An unknown id, or one from another worktree, fails with the
  * list of plans the agent could use instead.
  */
-async function findNamedPlan(projects: ProjectStore, cwd: string, planId: string): Promise<ProjectMeta> {
+export async function findNamedPlan(
+  projects: ProjectStore,
+  cwd: string,
+  planId: string,
+): Promise<ProjectMeta> {
   const all = await projects.list();
   const id = normalizePlanId(planId);
   const matches = (p: ProjectMeta): boolean => p.key === planId || (id != null && p.plan?.id === id);

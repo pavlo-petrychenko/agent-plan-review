@@ -30,6 +30,13 @@ import { renderMarkdown } from '../render/markdown.js';
 import { conflict, notFound, badRequest } from '../util/errors.js';
 import { withFileLock } from '../util/fs.js';
 import { syncHerdrPointers, type HerdrScope } from '../integrations/herdr.js';
+import {
+  joinWorktreePlan,
+  listWorktreePlans,
+  readWorktreePlan,
+  type PlanListEntry,
+  type PlanSnapshot,
+} from './sharing.js';
 import { forgetProjectsUnlocked, type ForgetResult } from './forget.js';
 
 /**
@@ -59,6 +66,21 @@ export class PlanReviewStore {
       await this.syncHerdr({ reviewId: recorded.reviewId });
       return recorded;
     });
+  }
+
+  /** The plans of the worktree containing `cwd`, newest first; `mine` is relative to `agentId`. */
+  listPlans(cwd: string, agentId: string): Promise<PlanListEntry[]> {
+    return listWorktreePlans(this, cwd, agentId);
+  }
+
+  /** One plan of the worktree (markdown + open threads). Read only. */
+  getPlan(cwd: string, planId: string, version?: number): Promise<PlanSnapshot> {
+    return readWorktreePlan(this, cwd, planId, version);
+  }
+
+  /** Make `agentId` a participant of a plan; its next submit without `planId` lands there. */
+  joinPlan(cwd: string, planId: string, agentId: string): Promise<ProjectMeta> {
+    return this.coordinate(() => joinWorktreePlan(this, cwd, planId, agentId));
   }
 
   private recordPlanUnlocked(input: RecordInput): Promise<RecordOutput> {
@@ -600,7 +622,9 @@ export class PlanReviewStore {
    * With `dryRun` nothing is touched; the result says what would go.
    */
   forgetProjects(keys: string[], dryRun = false): Promise<ForgetResult> {
-    return this.coordinate(() => forgetProjectsUnlocked(this.layout, this.projects, this.reviews, keys, dryRun));
+    return this.coordinate(() =>
+      forgetProjectsUnlocked(this.layout, this.projects, this.reviews, keys, dryRun),
+    );
   }
 
   /**

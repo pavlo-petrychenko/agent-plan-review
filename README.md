@@ -109,6 +109,12 @@ Add to `~/.claude/settings.json`:
      threads you fixed as you work through "request changes". Resolving stops the thread being
      delivered again and keeps it from carrying into the next version. `commentId` is the thread
      root id, never a reply id.
+   - **`plan_review_list`** `{ cwd? }` / **`plan_review_get`** `{ planId, version?, cwd? }` →
+     see the plans other agents wrote in this worktree (title, version, newest review status,
+     `mine`) and read one (markdown plus open threads). Read only.
+   - **`plan_review_join`** `{ planId, cwd? }` → continue another agent's plan: your next submit
+     (or `ExitPlanMode`) without `planId` becomes its next version. `plan_review_submit` also
+     takes `planId` (write to that plan) and `newPlan: true` (start a fresh one).
    - **`plan_review_attach_image`** `{ path | dataBase64, name? }` → store one image and get
      back the URL/markdown to embed.
 

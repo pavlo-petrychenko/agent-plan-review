@@ -119,6 +119,15 @@ re-anchored, so the conversation stays visible on the revised plan.
   pending, and needs no waiting agent. `commentId` is always the thread ROOT id,
   never a reply id.
 
+## Plans are per agent
+
+- Every agent in a worktree has its own plan. Plans of other agents may exist in
+  the same worktree; you do not have to use them.
+- Look with `plan_review_list`, read one with `plan_review_get { "planId" }`.
+- To continue one: `plan_review_join { "planId" }` (Claude Code: call it before
+  ExitPlanMode), or pass `planId` to `plan_review_submit`.
+- To start a fresh plan while you already have one: `newPlan: true` on submit.
+
 ## Multi-document plans
 
 For larger efforts, split the plan into pages inside one submission:
