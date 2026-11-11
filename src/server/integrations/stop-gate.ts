@@ -20,6 +20,7 @@ import path from 'node:path';
 import { loadConfig } from '../config.js';
 import { PlanReviewStore } from '../store/store.js';
 import { sameProjectCwd } from '../util/project-cwd.js';
+import { agentIdFrom } from '../agent-id.js';
 import { readStdinJson, finish } from './hook-io.js';
 
 const RECENT_WINDOW_MS = 5 * 3600 * 1000;
@@ -80,11 +81,17 @@ export async function runStopGate(): Promise<void> {
     const pending = await store.listReviews({ status: 'pending' });
     const now = Date.now();
     const sessionCwd = input.cwd ?? process.cwd();
+    // A review that names its agent belongs to that agent alone: another
+    // agent's pending review in this cwd must not hold this session's turn.
+    // Reviews from before agent ids keep the plain cwd match.
+    const me = agentIdFrom({ sessionId: input.session_id, env: process.env, harness: 'claude-code' });
     const match = pending.find(
       (r) =>
         (r.origin === 'mcp' || r.origin === 'api') &&
-        (sameProjectCwd(r.cwd, sessionCwd) ||
-          (r.agentCwd != null && sameProjectCwd(r.agentCwd, sessionCwd))) &&
+        (r.agentId
+          ? r.agentId === me
+          : sameProjectCwd(r.cwd, sessionCwd) ||
+            (r.agentCwd != null && sameProjectCwd(r.agentCwd, sessionCwd))) &&
         now - Date.parse(r.createdAt) < RECENT_WINDOW_MS,
     );
     if (!match) return finish({});

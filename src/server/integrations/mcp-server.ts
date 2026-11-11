@@ -27,6 +27,7 @@ import type { Comment, Review } from '../../shared/types.js';
 import { ensureServerRunning } from './spawn-server.js';
 import { openReview } from './browser.js';
 import { agentFromEnv } from './herdr.js';
+import { agentIdFrom, processAgentId } from '../agent-id.js';
 
 interface RpcRequest {
   jsonrpc?: string;
@@ -51,7 +52,7 @@ const TOOLS = [
       properties: {
         reviewId: {
           type: 'string',
-          description: 'Review id the thread belongs to; omit to use the newest pending review in cwd.',
+          description: 'Review id the thread belongs to; omit to use your newest pending review.',
         },
         commentId: {
           type: 'string',
@@ -152,7 +153,7 @@ const TOOLS = [
       properties: {
         reviewId: {
           type: 'string',
-          description: 'Review id from plan_review_submit. Omit to use the newest pending review in cwd.',
+          description: 'Review id from plan_review_submit. Omit to use your newest pending review.',
         },
         wait_seconds: {
           type: 'number',
@@ -179,7 +180,7 @@ const TOOLS = [
       type: 'object',
       required: ['commentId', 'body'],
       properties: {
-        reviewId: { type: 'string', description: 'Review id; omit to use the newest pending review in cwd.' },
+        reviewId: { type: 'string', description: 'Review id; omit to use your newest pending review.' },
         commentId: {
           type: 'string',
           description: 'threadId of the thread to reply to (from plan_review_check newComments).',
@@ -194,6 +195,10 @@ export async function runMcpServer(): Promise<void> {
   const store = new PlanReviewStore(loadConfig());
   /** MCP client name from `initialize` clientInfo (e.g. "claude-code", "pi"). */
   let clientName: string | undefined;
+  /** This process's agent id, fixed on first use so it stays stable for the process lifetime. */
+  let ownAgentId: string | undefined;
+  const myAgentId = (): string =>
+    (ownAgentId ??= agentIdFrom({ env: process.env, harness: clientName }) ?? processAgentId());
 
   const write = (obj: unknown): void => {
     process.stdout.write(`${JSON.stringify(obj)}\n`);
@@ -316,6 +321,7 @@ export async function runMcpServer(): Promise<void> {
         name: typeof args.name === 'string' ? args.name : undefined,
         origin: 'mcp',
         agent,
+        agentId: myAgentId(),
         markdown,
         docs,
         images,
@@ -501,10 +507,16 @@ export async function runMcpServer(): Promise<void> {
     if (typeof args.reviewId === 'string' && args.reviewId) {
       return (await store.getReview(args.reviewId)) ?? undefined;
     }
+    // Only this agent's own reviews: another agent's pending review in the same
+    // cwd must never be waited on, answered or resolved by mistake. Reviews that
+    // predate agent ids carry none and keep the old cwd match.
     const pending = await store.listReviews({ status: 'pending' });
+    const me = myAgentId();
     const cwd = process.cwd();
-    return pending.find(
-      (r) => sameProjectCwd(r.cwd, cwd) || (r.agentCwd != null && sameProjectCwd(r.agentCwd, cwd)),
+    return pending.find((r) =>
+      r.agentId
+        ? r.agentId === me
+        : sameProjectCwd(r.cwd, cwd) || (r.agentCwd != null && sameProjectCwd(r.agentCwd, cwd)),
     );
   }
 }

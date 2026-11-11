@@ -30,6 +30,7 @@ import { ensureServerRunning } from './spawn-server.js';
 import { waitForDecisionOrAsk } from './poll.js';
 import { openReview } from './browser.js';
 import { agentFromEnv } from './herdr.js';
+import { agentIdFrom } from '../agent-id.js';
 
 export async function runExitPlanModeHook(): Promise<void> {
   const input = (await readStdinJson()) as PreToolUseInput;
@@ -54,6 +55,8 @@ export async function runExitPlanModeHook(): Promise<void> {
         // re-present round stays one continuous thread.
         sessionId: input.session_id,
         agent,
+        // The session's own plan: a second agent in this worktree gets its own.
+        agentId: agentIdFrom({ sessionId: input.session_id, env: process.env, harness: 'claude-code' }),
         markdown: plan,
       });
     } catch (err) {

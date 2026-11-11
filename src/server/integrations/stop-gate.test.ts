@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 
-function makeReview(home: string, over: Partial<{ id: string; origin: string; cwd: string; status: string; ageMs: number }>): string {
+function makeReview(home: string, over: Partial<{ id: string; origin: string; cwd: string; status: string; ageMs: number; agentId: string }>): string {
   const id = over.id ?? `r-${Math.random().toString(36).slice(2, 8)}`;
   const createdAt = new Date(Date.now() - (over.ageMs ?? 0)).toISOString();
   const review = {
@@ -27,6 +27,7 @@ function makeReview(home: string, over: Partial<{ id: string; origin: string; cw
     origin: over.origin ?? 'mcp',
     cwd: over.cwd ?? process.cwd(),
     createdAt,
+    ...(over.agentId ? { agentId: over.agentId } : {}),
   };
   fs.mkdirSync(path.join(home, 'reviews'), { recursive: true });
   fs.writeFileSync(path.join(home, 'reviews', `${id}.json`), JSON.stringify(review));
@@ -48,7 +49,8 @@ function runGate(input: StopInput): Record<string, unknown> {
       input: JSON.stringify(input),
       encoding: 'utf8',
       cwd: REPO_ROOT,
-      env: { ...process.env, AGENT_PLAN_REVIEW_HOME: HOME },
+      // No ambient identity: the session id comes from the test's stdin.
+      env: { ...process.env, AGENT_PLAN_REVIEW_HOME: HOME, CLAUDE_CODE_SESSION_ID: '', HC_TERMINAL_ID: '' },
     },
   );
   return JSON.parse(out.trim() || '{}') as Record<string, unknown>;
@@ -104,4 +106,31 @@ test('hook-origin and old reviews never gate; other-cwd reviews do not gate this
   makeReview(HOME, { cwd: projectDir, ageMs: 6 * 3600 * 1000 });
   makeReview(HOME, { cwd: '/somewhere/else' });
   assert.deepEqual(runGate({ cwd: projectDir }), {});
+});
+
+test('a review of another agent never gates this session, even in the same cwd', () => {
+  const other = makeReview(HOME, { cwd: projectDir, agentId: 'claude:sess-b' });
+  assert.deepEqual(runGate({ cwd: projectDir, session_id: 'sess-a' }), {});
+  assert.ok(!fs.existsSync(path.join(HOME, 'gate', `${other}.reminded`)));
+  // A session without any identity cannot claim an agent's review either.
+  assert.deepEqual(runGate({ cwd: projectDir }), {});
+});
+
+test('the session is reminded about its own review, not the other agent\'s', () => {
+  const other = makeReview(HOME, { cwd: projectDir, agentId: 'claude:sess-b' });
+  const own = makeReview(HOME, { cwd: projectDir, agentId: 'claude:sess-a', ageMs: 1000 });
+  const result = runGate({ cwd: projectDir, session_id: 'sess-a' });
+  assert.equal(result.decision, 'block');
+  assert.match(String(result.reason), new RegExp(own));
+  assert.doesNotMatch(String(result.reason), new RegExp(other));
+  // B gets its own reminder, independently.
+  const forB = runGate({ cwd: projectDir, session_id: 'sess-b' });
+  assert.match(String(forB.reason), new RegExp(other));
+});
+
+test('a legacy review without agentId still gates any session in its cwd', () => {
+  const id = makeReview(HOME, { cwd: projectDir });
+  const result = runGate({ cwd: projectDir, session_id: 'sess-a' });
+  assert.equal(result.decision, 'block');
+  assert.match(String(result.reason), new RegExp(id));
 });

@@ -57,6 +57,10 @@ class McpDriver {
           // Never touch the network or a browser from tests.
           AGENT_PLAN_REVIEW_PORT: String(TEST_PORT),
           AGENT_PLAN_REVIEW_NO_OPEN: '1',
+          // Agent identity comes from the env: start from none, so a test run
+          // inside Claude Code or Herdr does not leak its own ids in.
+          CLAUDE_CODE_SESSION_ID: '',
+          HC_TERMINAL_ID: '',
           ...extraEnv,
         },
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -430,12 +434,105 @@ test('wait_seconds zero still checks for an Ask already posted', async () => {
   }
 });
 
-test('review lookup without reviewId never falls back to another project', async () => {
-  const driver = new McpDriver(home);
+test('review lookup without reviewId never falls back to another agent\'s review', async () => {
+  const driver = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-a' });
+  const other = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-b' });
   try {
     await submitPlan(driver);
-    const text = await driver.callTool('plan_review_check', { wait_seconds: 0 });
+    const text = await other.callTool('plan_review_check', { wait_seconds: 0 });
     assert.match(text, /"status":\s*"not_found"/);
+  } finally {
+    other.close();
+    driver.close();
+  }
+});
+
+/** Two MCP processes (two agents) with a pending plan each in ONE cwd. */
+async function twoAgentsInOneCwd(a: McpDriver, b: McpDriver): Promise<{ idA: string; idB: string }> {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'apr-proj-'));
+  const submit = async (d: McpDriver, markdown: string): Promise<string> => {
+    const text = await d.callTool('plan_review_submit', { cwd, markdown });
+    const m = text.match(/"reviewId":\s*"([^"]+)"/);
+    assert.ok(m, `submit should return reviewId, got: ${text}`);
+    return m[1];
+  };
+  // Sequential: the first submit boots the review server for this home.
+  const idA = await submit(a, '# Plan A\n\nFrom agent A.');
+  const idB = await submit(b, '# Plan B\n\nFrom agent B.');
+  return { idA, idB };
+}
+
+test('two agents in one cwd: check without reviewId returns each its own review', async () => {
+  const a = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-a' });
+  const b = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-b' });
+  try {
+    const { idA, idB } = await twoAgentsInOneCwd(a, b);
+    assert.notEqual(idA, idB);
+    for (const [driver, id, session] of [
+      [a, idA, 'sess-a'],
+      [b, idB, 'sess-b'],
+    ] as const) {
+      const review = JSON.parse(fs.readFileSync(path.join(home, 'reviews', `${id}.json`), 'utf8')) as {
+        agentId?: string;
+      };
+      assert.equal(review.agentId, `claude:${session}`);
+      assert.match(await driver.callTool('plan_review_check', { wait_seconds: 0 }), new RegExp(id));
+    }
+
+    // A's review is decided: A has nothing pending now, and must not get B's.
+    decideReview(home, idA, 'approved');
+    const afterDecision = await a.callTool('plan_review_check', { wait_seconds: 0 });
+    assert.match(afterDecision, /"status":\s*"not_found"/);
+    assert.doesNotMatch(afterDecision, new RegExp(idB));
+
+    // Reply/resolve without reviewId follow the same rule.
+    const reply = await a.callTool('plan_review_reply', { commentId: 'c1', body: 'hi' });
+    assert.match(reply, /No matching pending review/);
+  } finally {
+    b.close();
+    a.close();
+  }
+});
+
+test('agents with only a terminal id are kept apart per terminal', async () => {
+  const a = new McpDriver(home, { HC_TERMINAL_ID: 'tA' });
+  const b = new McpDriver(home, { HC_TERMINAL_ID: 'tB' });
+  try {
+    const { idA, idB } = await twoAgentsInOneCwd(a, b);
+    assert.match(await a.callTool('plan_review_check', { wait_seconds: 0 }), new RegExp(idA));
+    assert.match(await b.callTool('plan_review_check', { wait_seconds: 0 }), new RegExp(idB));
+  } finally {
+    b.close();
+    a.close();
+  }
+});
+
+test('with no env identity each MCP process is its own agent', async () => {
+  const a = new McpDriver(home);
+  const b = new McpDriver(home);
+  try {
+    const { idA, idB } = await twoAgentsInOneCwd(a, b);
+    const review = JSON.parse(fs.readFileSync(path.join(home, 'reviews', `${idA}.json`), 'utf8')) as {
+      agentId?: string;
+    };
+    assert.match(review.agentId ?? '', /^proc:/);
+    assert.match(await a.callTool('plan_review_check', { wait_seconds: 0 }), new RegExp(idA));
+    assert.match(await b.callTool('plan_review_check', { wait_seconds: 0 }), new RegExp(idB));
+  } finally {
+    b.close();
+    a.close();
+  }
+});
+
+test('a legacy review without agentId is still found by cwd', async () => {
+  const driver = new McpDriver(home, { CLAUDE_CODE_SESSION_ID: 'sess-a' });
+  try {
+    const reviewId = await submitPlan(driver);
+    // What a review stored before agent ids looks like, in the MCP server's cwd.
+    patchReview(home, reviewId, { agentId: undefined, cwd: REPO_ROOT });
+    const text = await driver.callTool('plan_review_check', { wait_seconds: 0 });
+    assert.match(text, new RegExp(reviewId));
+    assert.match(text, /"status":\s*"pending"/);
   } finally {
     driver.close();
   }

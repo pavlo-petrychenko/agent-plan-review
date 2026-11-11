@@ -110,3 +110,74 @@ test('the hook links its review to HC_TERMINAL_ID and approval still echoes upda
     }
   }
 });
+
+test('the review carries claude:<session_id>; two sessions in one cwd get two plan projects', async () => {
+  const home = tmp('apr-hook-agents-');
+  const cwd = tmp('apr-hook-agents-proj-');
+  const procs: ReturnType<typeof spawn>[] = [];
+
+  // Starts a hook for one session and resolves with the review it created.
+  const present = async (sessionId: string, plan: string, toolUseId: string) => {
+    const reviewsDir = path.join(home, 'reviews');
+    const before = new Set(fs.existsSync(reviewsDir) ? fs.readdirSync(reviewsDir) : []);
+    const proc = spawn(
+      process.execPath,
+      ['--import', 'tsx', path.join(REPO_ROOT, 'src', 'server', 'cli.ts'), 'hook-exit-plan-mode'],
+      {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          AGENT_PLAN_REVIEW_HOME: home,
+          AGENT_PLAN_REVIEW_PORT: String(47000 + (process.pid % 1000)),
+          AGENT_PLAN_REVIEW_NO_OPEN: '1',
+          AGENT_PLAN_REVIEW_TIMEOUT: '90',
+          // The stdin session id must decide, not an ambient one.
+          CLAUDE_CODE_SESSION_ID: '',
+          HC_TERMINAL_ID: '',
+        },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+    );
+    procs.push(proc);
+    proc.stdout.on('data', () => {});
+    proc.stderr.on('data', () => {});
+    proc.stdin.end(
+      JSON.stringify({
+        session_id: sessionId,
+        cwd,
+        hook_event_name: 'PreToolUse',
+        tool_name: 'ExitPlanMode',
+        tool_input: { plan },
+        tool_use_id: toolUseId,
+      }),
+    );
+    const file = await waitFor(() => {
+      const fresh = fs.existsSync(reviewsDir)
+        ? fs.readdirSync(reviewsDir).filter((f) => f.endsWith('.json') && !before.has(f))
+        : [];
+      return fresh[0] ? path.join(reviewsDir, fresh[0]) : undefined;
+    }, 30000);
+    return JSON.parse(fs.readFileSync(file, 'utf8')) as { agentId?: string; projectKey: string };
+  };
+
+  try {
+    // Sequential: the first hook boots the review server for this home.
+    const a = await present('sess-a', '# Plan A\n\nalpha', 'tu-a');
+    const b = await present('sess-b', '# Plan B\n\nbeta', 'tu-b');
+    assert.equal(a.agentId, 'claude:sess-a');
+    assert.equal(b.agentId, 'claude:sess-b');
+    assert.notEqual(a.projectKey, b.projectKey);
+    assert.match(a.projectKey, /\.p-[0-9a-f]{6}$/);
+    assert.match(b.projectKey, /\.p-[0-9a-f]{6}$/);
+    const projects = fs.readdirSync(path.join(home, 'projects'));
+    assert.equal(projects.length, 2);
+  } finally {
+    for (const proc of procs) proc.kill();
+    try {
+      const server = JSON.parse(fs.readFileSync(path.join(home, 'server.json'), 'utf8')) as { pid: number };
+      process.kill(server.pid);
+    } catch {
+      // already gone
+    }
+  }
+});
