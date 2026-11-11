@@ -11,6 +11,20 @@ export class PlanValidationError extends Error {
   }
 }
 
+/**
+ * The submission named a plan (planId) that cannot be used from this worktree.
+ * A PlanValidationError, so every integration reports it the way it reports a
+ * malformed plan: "NOT recorded" plus the message, which lists the plans the
+ * agent can pick instead.
+ */
+export class PlanSelectionError extends PlanValidationError {
+  constructor(message: string) {
+    super([{ message }]);
+    this.name = 'PlanSelectionError';
+    this.message = message;
+  }
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly payload: Record<string, unknown>;

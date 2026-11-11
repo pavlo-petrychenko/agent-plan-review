@@ -123,6 +123,15 @@ export interface ProjectMeta {
   storage?: {
     gist?: GistBinding;
   };
+  /**
+   * Set on a plan project (key `<worktree key>.p-<id>`): one of possibly many
+   * plans in the worktree `cwd`. Absent on the worktree's legacy project (the
+   * bare worktree key, as stored before plans existed). `title` follows the
+   * root title of the newest version.
+   */
+  plan?: { id: string; title: string };
+  /** Agent ids that wrote to or joined this project, newest last, no repeats. */
+  agents?: string[];
 }
 
 export interface Review {
@@ -153,6 +162,8 @@ export interface Review {
    * known. Plain metadata: recorded whether or not the Herdr integration is on.
    */
   agent?: ReviewAgent;
+  /** Agent id (see server/agent-id.ts) that submitted this review, when known. */
+  agentId?: string;
   /**
    * ISO timestamp of the newest targeted Ask already handed to the agent by
    * plan_review_check — the cursor that keeps the conversation from looping.

@@ -16,3 +16,18 @@ test('readable base plus hash suffix', () => {
 test('weird characters sanitized', () => {
   assert.match(sanitizeProjectKey('C:\\Users\\Dev\\Proj Name!!'), /^proj-name-[0-9a-f]{8}$/);
 });
+
+test('plan project keys round-trip and never collide with worktree keys', async () => {
+  const { newPlanId, normalizePlanId, parsePlanProjectKey, planProjectKey } = await import('./keys.js');
+  const wt = sanitizeProjectKey('/code/website');
+  const id = newPlanId();
+  assert.match(id, /^p-[0-9a-f]{6}$/);
+  const key = planProjectKey(wt, id);
+  assert.deepEqual(parsePlanProjectKey(key), { worktreeKey: wt, planId: id });
+  assert.equal(parsePlanProjectKey(wt), null);
+  // A worktree folder named like a plan suffix still ends in its path hash.
+  assert.equal(parsePlanProjectKey(sanitizeProjectKey('/code/x.p-abcdef')), null);
+  assert.equal(normalizePlanId('P-3F9A1C'), 'p-3f9a1c');
+  assert.equal(normalizePlanId('3f9a1c'), 'p-3f9a1c');
+  assert.equal(normalizePlanId(key), null);
+});

@@ -1,8 +1,8 @@
 /**
  * `agent-plan-review forget --worktree <path> [--dry-run] [--json]`
  *
- * Deletes everything the store holds for one worktree: its project (versions,
- * comments, reviews), plan images no other project uses, and Herdr pointer
+ * Deletes everything the store holds for one worktree: its projects — every
+ * plan plus the legacy worktree project — (versions, comments, reviews), plan images no other project uses, and Herdr pointer
  * files. Works when the folder is already gone (the key comes from the path).
  * Exit code 0 also when nothing matched.
  */
@@ -11,6 +11,7 @@ import path from 'node:path';
 import type { ServerConfig } from './config.js';
 import { removePointerFiles, worktreeProjectKeys } from './integrations/herdr-worktrees.js';
 import { PlanReviewStore } from './store/store.js';
+import { parsePlanProjectKey } from '../shared/keys.js';
 
 export interface ForgetArgs {
   worktree: string;
@@ -55,7 +56,13 @@ export async function forgetWorktree(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<ForgetReport> {
   const abs = path.resolve(worktree);
-  const keys = worktreeProjectKeys(abs);
+  // Plan projects are found by key prefix, not by cwd: the folder may be gone,
+  // and their key names the worktree key they live in.
+  const worktreeKeys = new Set(worktreeProjectKeys(abs));
+  const planKeys = (await store.projects.list())
+    .map((p) => p.key)
+    .filter((k) => worktreeKeys.has(parsePlanProjectKey(k)?.worktreeKey ?? ''));
+  const keys = [...worktreeKeys, ...planKeys];
   const result = await store.forgetProjects(keys, dryRun);
   // Pointers go even when no project matched: a stale pointer is still garbage.
   const pointers = await removePointerFiles(keys, dryRun, env);

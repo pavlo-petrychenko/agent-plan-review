@@ -120,6 +120,27 @@ test('forget removes the worktree project and keeps the others', async () => {
   );
 });
 
+test('forget removes every plan of the worktree plus its legacy project', async () => {
+  const { store, env } = fixture();
+  const gone = path.join(env.userHome, 'wt', 'multi');
+  const other = path.join(env.userHome, 'wt', 'multi-other');
+  const legacy = await plan(store, gone, ['l']);
+  const md = (t: string) => ({ cwd: gone, origin: 'mcp' as const, markdown: `# ${t}\n\nbody` });
+  const a = (await store.recordPlan({ ...md('A'), agentId: 'claude:a' })).projectKey;
+  const b = (await store.recordPlan({ ...md('B'), agentId: 'claude:b' })).projectKey;
+  const keep = (await store.recordPlan({ cwd: other, origin: 'mcp', markdown: '# K\n\nk', agentId: 'claude:a' }))
+    .projectKey;
+  const pointer = writePointer(env, 'term-a', a);
+
+  const report = await forgetWorktree(store, gone, false, procEnv(env));
+
+  assert.deepEqual(report.projects.map((p) => p.key).sort(), [legacy, a, b].sort());
+  for (const key of [legacy, a, b]) assert.equal(await store.projects.get(key), null);
+  assert.ok(await store.projects.get(keep));
+  assert.deepEqual((await store.reviews.list()).map((r) => r.projectKey), [keep]);
+  assert.deepEqual(report.pointers, [pointer]);
+});
+
 test('forget deletes exclusive images and keeps images another project uses', async () => {
   const { store, home, env } = fixture();
   const a = path.join(env.userHome, 'wt', 'a');

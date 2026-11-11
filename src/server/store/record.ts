@@ -11,11 +11,17 @@ import type {
 } from '../../shared/types.js';
 import { parsePlan, type ParsedDoc } from '../../shared/parser.js';
 import { validateDocs, type ValidatableDoc } from '../../shared/validate.js';
-import { sanitizeProjectKey } from '../../shared/keys.js';
-import { resolveProjectCwd } from '../util/project-cwd.js';
+import {
+  newPlanId,
+  normalizePlanId,
+  parsePlanProjectKey,
+  planProjectKey,
+  sanitizeProjectKey,
+} from '../../shared/keys.js';
+import { resolveProjectCwd, sameProjectCwd } from '../util/project-cwd.js';
 import type { Layout } from './paths.js';
 import { ensureDir } from '../util/fs.js';
-import { PlanValidationError } from '../util/errors.js';
+import { PlanSelectionError, PlanValidationError } from '../util/errors.js';
 import { VersionStore } from './versions.js';
 import type { ProjectStore } from './projects.js';
 import type { ReviewStore } from './reviews.js';
@@ -47,6 +53,15 @@ export interface RecordInput {
   docs?: StructuredDoc[];
   /** Images attached to this submission, referenced from the text as `image:<name>`. */
   images?: PlanImageInput[];
+  /**
+   * Who is submitting (see server/agent-id.ts). With it, the plan goes to this
+   * agent's own plan in the worktree instead of the shared worktree project.
+   */
+  agentId?: string;
+  /** Write to this plan: a plan id (`p-3f9a1c`) or a full project key. */
+  planId?: string;
+  /** Start a new plan in the worktree even when the agent already has one. */
+  newPlan?: boolean;
 }
 
 export interface RecordOutput extends RecordPlanResult {
@@ -139,12 +154,13 @@ export async function recordPlan(
   // Fold subdirectory submissions onto their repo/worktree root (or the nearest
   // already-registered project) so one codebase stays one project. Worktrees
   // stay separate: a worktree's own toplevel IS the worktree root.
-  const cwd = resolveProjectCwd(
-    rawCwd,
-    (await projects.list()).map((p) => p.cwd),
-  );
-  const key = sanitizeProjectKey(cwd);
-  const { meta } = await projects.getOrCreate(cwd, input.name);
+  // Many projects (plans) share one worktree cwd, so de-duplicate. Every
+  // registered cwd is a worktree root, never a plan, so folding can only land
+  // on a worktree.
+  const cwd = resolveProjectCwd(rawCwd, [...new Set((await projects.list()).map((p) => p.cwd))]);
+  const rootTitle = (docs.find((d) => !d.parent) ?? docs[0]).title;
+  const meta = await chooseProject(projects, reviews, cwd, rootTitle, input);
+  const key = meta.key;
 
   // --- double-fire dedup lock -------------------------------------------------
   let isLoser = false;
@@ -214,6 +230,7 @@ export async function recordPlan(
     }
     meta.currentVersion = version;
     meta.latestHash = hash;
+    if (meta.plan) meta.plan = { ...meta.plan, title: rootTitle };
     meta.updatedAt = new Date().toISOString();
     await projects.save(meta);
 
@@ -276,6 +293,7 @@ export async function recordPlan(
         toolUseId: input.toolUseId,
         sessionId: input.sessionId,
         agent: input.agent,
+        agentId: input.agentId,
       });
 
   const reviewUrl = `http://localhost:${port}/?project=${encodeURIComponent(key)}&version=${version}&review=${review.id}`;
@@ -289,6 +307,101 @@ export async function recordPlan(
     reusedReview,
     manifest,
   };
+}
+
+// ---------------------------------------------------------------------------
+// project routing
+// ---------------------------------------------------------------------------
+
+/**
+ * Pick the project a submission writes to. A worktree holds several plans, one
+ * per agent, so the version line, content-hash dedup and thread carry-forward
+ * (all keyed by the returned project) never mix two agents' plans:
+ *
+ *  1. `planId` → that plan; it must live in this worktree.
+ *  2. `newPlan` → a fresh plan.
+ *  3. a hook submit whose session already has a pending hook review in the
+ *     worktree's legacy project → stay there, so a session that was running
+ *     when plans were introduced is not split across two projects.
+ *  4. `agentId` → the most recently updated project of this worktree that
+ *     lists the agent, else a fresh plan. The legacy project is only found
+ *     here once the agent joined it (rule 1 or 3): it is never auto-claimed.
+ *  5. no agent at all → the legacy worktree project, exactly as before plans.
+ *
+ * The agent is recorded in the chosen project's `agents` (moved to the end).
+ */
+async function chooseProject(
+  projects: ProjectStore,
+  reviews: ReviewStore,
+  cwd: string,
+  rootTitle: string,
+  input: RecordInput,
+): Promise<ProjectMeta> {
+  const worktreeKey = sanitizeProjectKey(cwd);
+  const agentId = input.agentId?.trim() || undefined;
+  const planId = input.planId?.trim() || undefined;
+  const createPlan = async (): Promise<ProjectMeta> => {
+    let id = newPlanId();
+    // 24 random bits per worktree: a clash is unlikely, never fatal.
+    while (await projects.get(planProjectKey(worktreeKey, id))) id = newPlanId();
+    return projects.createPlan(planProjectKey(worktreeKey, id), cwd, { id, title: rootTitle }, input.name);
+  };
+
+  let meta: ProjectMeta | undefined;
+  if (planId) {
+    meta = await findNamedPlan(projects, cwd, planId);
+  } else if (input.newPlan) {
+    meta = await createPlan();
+  } else if (agentId) {
+    const inWorktree = await projects.listByWorktree(cwd);
+    const legacy = inWorktree.find((p) => p.key === worktreeKey && !p.plan);
+    if (legacy && input.origin === 'hook' && input.sessionId) {
+      const pending = await reviews.list({ status: 'pending', projectKey: legacy.key });
+      if (pending.some((r) => r.origin === 'hook' && r.sessionId === input.sessionId)) meta = legacy;
+    }
+    // listByWorktree is newest first, so the first hit is the most recent.
+    meta ??= inWorktree.find((p) => p.agents?.includes(agentId)) ?? (await createPlan());
+  } else {
+    return (await projects.getOrCreate(cwd, input.name)).meta;
+  }
+
+  if (agentId && meta.agents?.at(-1) !== agentId) {
+    meta.agents = [...(meta.agents ?? []).filter((a) => a !== agentId), agentId];
+    await projects.save(meta);
+  }
+  return meta;
+}
+
+/**
+ * Resolve an explicit `planId` (plan id or full project key) to a project of
+ * this worktree. An unknown id, or one from another worktree, fails with the
+ * list of plans the agent could use instead.
+ */
+async function findNamedPlan(projects: ProjectStore, cwd: string, planId: string): Promise<ProjectMeta> {
+  const all = await projects.list();
+  const id = normalizePlanId(planId);
+  const matches = (p: ProjectMeta): boolean => p.key === planId || (id != null && p.plan?.id === id);
+  const here = all.filter((p) => sameProjectCwd(p.cwd, cwd));
+  // Plan ids are only unique per worktree: prefer a match in this one.
+  const found = here.find(matches) ?? all.find(matches);
+  if (found && here.includes(found)) return found;
+
+  const listing =
+    here.length === 0
+      ? 'This worktree has no plans yet; omit planId to start one.'
+      : 'Plans in this worktree:\n' +
+        here
+          .map((p) => {
+            const label = p.plan ? `${p.plan.id} "${p.plan.title}"` : `${p.key} (worktree plan)`;
+            return `- ${label}, v${p.currentVersion}`;
+          })
+          .join('\n');
+  const why = found
+    ? `Plan "${planId}" belongs to another worktree (${found.cwd}), not ${cwd}.`
+    : parsePlanProjectKey(planId) || id
+      ? `Unknown plan "${planId}".`
+      : `"${planId}" is not a plan id (expected p-<6 hex> or a project key).`;
+  throw new PlanSelectionError(`${why}\n${listing}`);
 }
 
 // ---------------------------------------------------------------------------
